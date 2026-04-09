@@ -1,0 +1,18 @@
+## Interface: 120001
+## Title: HexCD
+## Notes: Dispel and kick rotation tracker with overlay UI
+## Author: Hex
+## Version: 1.0.0
+## SavedVariables: HexCDDB
+
+Util.lua
+DebugLog.lua
+Config.lua
+SpellDB.lua
+CooldownTracker.lua
+DispelTracker.lua
+KickTracker.lua
+CommSync.lua
+PartyCDDisplay.lua
+ConfigGUI.lua
+Core.lua
