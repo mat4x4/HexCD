@@ -2,7 +2,8 @@
 ## Title: HexCD Reminder
 ## Notes: Cooldown reminders with timer bars and TTS for boss fights and M+ dungeons
 ## Author: Hex
-## Version: 1.0.0
+## Version: @project-version@
+## X-Wago-ID: rNkyYlKa
 ## SavedVariables: HexCDReminderDB
 ## OptionalDeps: BigWigs
 
