@@ -10,8 +10,3 @@ ignore:
   - .github
   - "*.md"
   - .gitignore
-  - HexCD_Reminder
-
-move-folders:
-  HexCD/HexCD: HexCD
-  HexCD/HexCD_Reminder: HexCD_Reminder
