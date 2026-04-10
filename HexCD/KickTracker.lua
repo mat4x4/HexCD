@@ -11,6 +11,7 @@ HexCD.KickTracker = {}
 local KT = HexCD.KickTracker
 local Config = HexCD.Config
 local Log = HexCD.DebugLog
+local Util = HexCD.Util
 
 ------------------------------------------------------------------------
 -- Constants
@@ -61,127 +62,203 @@ local ADDON_MSG_PREFIX = "HexCD"
 local commsRegistered = false
 
 ------------------------------------------------------------------------
--- State
+-- Taint laundering (from InterruptTracker by josh-the-dev)
+-- UNIT_SPELLCAST_SUCCEEDED spellID for party members is a "secret value"
+-- in Midnight 12.0. Passing it through a StatusBar's SetValue causes C++
+-- to re-emit a clean value via OnValueChanged.
+------------------------------------------------------------------------
+local launderBar = CreateFrame("StatusBar")
+launderBar:SetMinMaxValues(0, 9999999)
+local _launderedID = nil
+launderBar:SetScript("OnValueChanged", function(_, v) _launderedID = v end)
+
+local function SafeGetKickData(spellID)
+    -- Try direct lookup first (pcall guards tainted key access)
+    local ok, data = pcall(function() return KICK_SPELL_IDS[spellID] end)
+    if ok and data then return data, spellID end
+    -- Launder through StatusBar to strip taint
+    _launderedID = nil
+    launderBar:SetValue(0)
+    pcall(launderBar.SetValue, launderBar, spellID)
+    local cleanID = _launderedID
+    if cleanID then
+        local ok2, data2 = pcall(function() return KICK_SPELL_IDS[cleanID] end)
+        if ok2 and data2 then return data2, cleanID end
+    end
+    return nil, nil
+end
+
+------------------------------------------------------------------------
+-- Correlation-based party interrupt detection (from InterruptTracker)
+-- UNIT_SPELLCAST_SUCCEEDED fires for party members but spellID is tainted.
+-- UNIT_SPELLCAST_INTERRUPTED fires on nameplates when a mob cast is kicked.
+-- Match the two by timestamp within 50ms to determine who kicked.
+-- Works even if the other player doesn't have HexCD!
+------------------------------------------------------------------------
+local pendingCasts = {}       -- [unit] = GetTime()
+local pendingInterrupts = {}  -- [nameplateUnit] = GetTime()
+local correlPending = false
+local CORREL_WINDOW = 0.050   -- 50ms match window
+
+local function ProcessCorrelation()
+    correlPending = false
+
+    -- Count interrupt events
+    local interruptCount, targetUnit = 0, nil
+    for unit in pairs(pendingInterrupts) do
+        interruptCount = interruptCount + 1
+        targetUnit = unit
+    end
+
+    if interruptCount == 0 then
+        wipe(pendingCasts)
+        return
+    end
+
+    -- Multiple simultaneous interrupts = AoE CC, not a kick
+    if interruptCount > 1 then
+        wipe(pendingInterrupts)
+        wipe(pendingCasts)
+        return
+    end
+
+    local interruptTime = pendingInterrupts[targetUnit]
+
+    -- Find the party member whose cast timestamp is closest
+    local bestUnit, bestDiff = nil, math.huge
+    for unit, castTime in pairs(pendingCasts) do
+        local diff = math.abs(interruptTime - castTime)
+        if diff <= CORREL_WINDOW and diff < bestDiff then
+            bestUnit, bestDiff = unit, diff
+        end
+    end
+
+    if bestUnit then
+        local ok, name = pcall(UnitName, bestUnit)
+        if ok and name then
+            local shortName = StripRealm(name)
+            -- Route through HandleKickByName with dedup (layer 3 = "correlated")
+            for gi = 1, MAX_GROUPS do
+                for _, entry in ipairs(groups[gi].rotation) do
+                    if entry.name == shortName then
+                        HandleKickByName(shortName, entry.spellID or 0, gi, "correlated")
+                        break
+                    end
+                end
+            end
+        end
+    end
+
+    wipe(pendingInterrupts)
+    wipe(pendingCasts)
+end
+
+local correlFrame = CreateFrame("Frame")
+correlFrame:RegisterEvent("UNIT_SPELLCAST_SUCCEEDED")
+correlFrame:RegisterEvent("UNIT_SPELLCAST_INTERRUPTED")
+correlFrame:SetScript("OnEvent", function(_, event, unit)
+    if not Config:Get("kickEnabled") then return end
+
+    if event == "UNIT_SPELLCAST_SUCCEEDED" then
+        -- Skip player (handled by main event frame) and non-party units
+        if unit == "player" or unit == "pet" then return end
+        if not unit:find("^party") then return end
+        pendingCasts[unit] = GetTime()
+        if not correlPending then
+            correlPending = true
+            C_Timer.After(0.03, ProcessCorrelation)
+        end
+
+    elseif event == "UNIT_SPELLCAST_INTERRUPTED" then
+        -- Only care about nameplate units (mob cast was interrupted)
+        if not unit:find("^nameplate") then return end
+        pendingInterrupts[unit] = GetTime()
+        if not correlPending then
+            correlPending = true
+            C_Timer.After(0.03, ProcessCorrelation)
+        end
+    end
+end)
+
+------------------------------------------------------------------------
+-- Per-Group State (2 groups for raid use)
 ------------------------------------------------------------------------
 
-local kickRotation = {}         -- { {name, class, spellID, cd, kickName}, ... }
-local currentIdx = 1            -- who's next in rotation
-local kickCDState = {}          -- rotationIdx → {lastTime, readyTime}
-local visibilityState = "HIDDEN"
-local lastAlertTime = 0
+local MAX_GROUPS = 2
+
+local function NewGroupState()
+    return {
+        rotation = {},
+        currentIdx = 1,
+        cdState = {},
+        unitMap = {},
+        visibilityState = "HIDDEN",
+        lastAlertTime = 0,
+        bars = {},
+        anchorFrame = nil,
+        headerText = nil,
+        onUpdateFrame = nil,
+        onUpdateThrottle = 0,
+    }
+end
+
+local groups = { NewGroupState(), NewGroupState() }
+local myGroupIdx = nil
+
+-- Shared state
 local inCombat = false
+local groupUnits = {}
 
--- Frame pools
-local kickerBars = {}           -- pre-allocated bar frames
-local anchorFrame = nil
-local headerText = nil
-local onUpdateFrame = nil
-local onUpdateThrottle = 0
+--- Helper to get config key for a group
+local function CfgKey(base, gi)
+    if gi == 1 or not gi then return base end
+    return base .. tostring(gi)
+end
 
--- Group unit mapping
-local groupUnits = {}           -- unit tokens for current group
-local rotationUnitMap = {}      -- rotationIdx → unitToken
+--- Resolve which group the local player is in
+local function ResolveMyGroup()
+    local playerName = StripRealm(UnitName("player") or "")
+    for gi = 1, MAX_GROUPS do
+        for _, entry in ipairs(groups[gi].rotation) do
+            if entry.name == playerName then
+                myGroupIdx = gi
+                return
+            end
+        end
+    end
+    myGroupIdx = nil
+end
+
+-- Backward-compat aliases for group 1
+local kickRotation = groups[1].rotation
+local currentIdx = groups[1].currentIdx
+local kickCDState = groups[1].cdState
+local kickerBars = groups[1].bars
+local anchorFrame = groups[1].anchorFrame
+local headerText = groups[1].headerText
+local visibilityState = groups[1].visibilityState
+local lastAlertTime = groups[1].lastAlertTime
+local onUpdateFrame = groups[1].onUpdateFrame
+local onUpdateThrottle = groups[1].onUpdateThrottle
+local rotationUnitMap = groups[1].unitMap
 
 ------------------------------------------------------------------------
 -- Bar Creation
 ------------------------------------------------------------------------
 
 local function CreateKickerBar(index)
-    local bar = CreateFrame("StatusBar", "HexCDKickBar" .. index, nil, "BackdropTemplate")
-    bar:SetSize(200, 20)
-    bar:SetStatusBarTexture("Interface\\TargetingFrame\\UI-StatusBar")
-    bar:SetMinMaxValues(0, 1)
-    bar:SetValue(1)
-    bar:Hide()
-
-    bar:SetBackdrop({
-        bgFile = "Interface\\DialogFrame\\UI-DialogBox-Background",
-        edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border",
-        edgeSize = 8,
-        insets = { left = 2, right = 2, top = 2, bottom = 2 },
-    })
-    bar:SetBackdropColor(0.1, 0.1, 0.15, 0.85)
-    bar:SetBackdropBorderColor(0.3, 0.3, 0.35, 0.6)
-
-    -- Background
-    local bg = bar:CreateTexture(nil, "BACKGROUND")
-    bg:SetAllPoints()
-    bg:SetColorTexture(0.05, 0.05, 0.08, 0.9)
-    bar.bg = bg
-
-    -- CD/Ready text (right)
-    local cdText = bar:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-    cdText:SetPoint("RIGHT", -6, 0)
-    cdText:SetJustifyH("RIGHT")
-    bar.cdText = cdText
-
-    -- Number + name text (left)
-    local nameText = bar:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-    nameText:SetPoint("LEFT", 6, 0)
-    nameText:SetPoint("RIGHT", cdText, "LEFT", -4, 0)
-    nameText:SetJustifyH("LEFT")
-    bar.nameText = nameText
-
-    -- Gold border for active kicker
-    local goldBorder = CreateFrame("Frame", nil, bar, "BackdropTemplate")
-    goldBorder:SetPoint("TOPLEFT", -3, 3)
-    goldBorder:SetPoint("BOTTOMRIGHT", 3, -3)
-    goldBorder:SetBackdrop({
-        edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border",
-        edgeSize = 12,
-    })
-    goldBorder:SetBackdropBorderColor(1.0, 0.84, 0.0, 1.0)
-    goldBorder:Hide()
-    bar.goldBorder = goldBorder
-
-    bar._active = false
-    bar._index = index
-    return bar
+    return Util.CreateTrackerBar("HexCDKickBar" .. index)
 end
 
-------------------------------------------------------------------------
--- Anchor Frame
-------------------------------------------------------------------------
-
-local function CreateAnchor()
-    local f = CreateFrame("Frame", "HexCDKickAnchor", UIParent, "BackdropTemplate")
-    f:SetSize(210, 24)
-    f:SetBackdrop({
-        bgFile = "Interface\\DialogFrame\\UI-DialogBox-Background",
-        edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border",
-        edgeSize = 8,
-        insets = { left = 2, right = 2, top = 2, bottom = 2 },
-    })
-    f:SetBackdropColor(0.08, 0.08, 0.12, 0.9)
-    f:SetBackdropBorderColor(0.3, 0.5, 0.7, 0.8)
-
-    headerText = f:CreateFontString(nil, "OVERLAY", "GameFontNormal")
-    headerText:SetPoint("TOPLEFT", 8, -4)
-    headerText:SetPoint("RIGHT", -8, 0)
-    headerText:SetJustifyH("LEFT")
-    headerText:SetText("|cFF88CCFFKICK|r")
-
-    -- Position from config
-    local point = Config:Get("kickAnchorPoint") or "CENTER"
-    local x = Config:Get("kickAnchorX") or -300
-    local y = Config:Get("kickAnchorY") or 0
-    f:SetPoint(point, UIParent, point, x, y)
-
-    -- Draggable
-    f:SetMovable(true)
-    f:EnableMouse(false)
-    f:RegisterForDrag("LeftButton")
-    f:SetScript("OnDragStart", function(self) self:StartMoving() end)
-    f:SetScript("OnDragStop", function(self)
-        self:StopMovingOrSizing()
-        local p, _, _, px, py = self:GetPoint()
-        Config:Set("kickAnchorPoint", p)
-        Config:Set("kickAnchorX", px)
-        Config:Set("kickAnchorY", py)
-    end)
-
-    f:Hide()
-    return f
+local kickAnchorCount = 0
+local function CreateAnchor(pointKey, xKey, yKey, defaultX, defaultY)
+    kickAnchorCount = kickAnchorCount + 1
+    pointKey = pointKey or "kickAnchorPoint"
+    xKey = xKey or "kickAnchorX"
+    yKey = yKey or "kickAnchorY"
+    defaultX = defaultX or -300
+    defaultY = defaultY or 0
+    return Util.CreateTrackerAnchor("HexCDKickAnchor" .. kickAnchorCount, {0.08, 0.08, 0.12}, {0.3, 0.5, 0.7}, "CENTER", defaultX, defaultY, pointKey, xKey, yKey)
 end
 
 ------------------------------------------------------------------------
@@ -189,12 +266,24 @@ end
 ------------------------------------------------------------------------
 
 function KT:Init()
-    anchorFrame = CreateAnchor()
-
-    for i = 1, BAR_POOL_SIZE do
-        kickerBars[i] = CreateKickerBar(i)
-        kickerBars[i]:SetParent(anchorFrame)
+    -- Create UI for both groups
+    for gi = 1, MAX_GROUPS do
+        local gs = groups[gi]
+        local suffix = gi == 1 and "" or "2"
+        local defY = gi == 1 and 0 or -80
+        gs.anchorFrame = CreateAnchor("kickAnchorPoint" .. suffix, "kickAnchorX" .. suffix, "kickAnchorY" .. suffix, -300, defY)
+        gs.bars = {}
+        for i = 1, BAR_POOL_SIZE do
+            gs.bars[i] = CreateKickerBar(i)
+            gs.bars[i]:SetParent(gs.anchorFrame)
+        end
+        gs.headerText = gs.anchorFrame:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+        gs.headerText:SetPoint("TOP", 0, -2)
     end
+    -- Backward compat aliases
+    anchorFrame = groups[1].anchorFrame
+    kickerBars = groups[1].bars
+    headerText = groups[1].headerText
 
     -- Register addon message prefix (idempotent — DispelTracker may have already done this)
     if C_ChatInfo and C_ChatInfo.RegisterAddonMessagePrefix then
@@ -219,11 +308,16 @@ function KT:Init()
         KT:UpdateDisplay()
     end)
 
-    -- Load rotation from saved config
+    -- Load rotation from saved config, or auto-enroll
     local saved = Config:Get("kickRotation")
     if saved and #saved > 0 then
         KT:SetRotation(saved)
     end
+    local saved2 = Config:Get("kickRotation2")
+    if saved2 and #saved2 > 0 then
+        KT:SetRotation(saved2, 2)
+    end
+    KT:AutoEnroll()
 
     Log:Log("DEBUG", "KickTracker initialized")
 end
@@ -232,41 +326,49 @@ end
 -- Rotation Management
 ------------------------------------------------------------------------
 
-function KT:SetRotation(names)
-    kickRotation = {}
+function KT:SetRotation(names, groupIdx)
+    groupIdx = groupIdx or 1
+    local gs = groups[groupIdx]
+    gs.rotation = {}
+
     if type(names) == "string" then
         for name in names:gmatch("[^,]+") do
             name = StripRealm(name:match("^%s*(.-)%s*$"))
-            table.insert(kickRotation, { name = name, class = nil })
+            table.insert(gs.rotation, { name = name, class = nil })
         end
     elseif type(names) == "table" then
         for _, entry in ipairs(names) do
             if type(entry) == "string" then
-                table.insert(kickRotation, { name = entry, class = nil })
+                table.insert(gs.rotation, { name = entry, class = nil })
             elseif type(entry) == "table" then
-                table.insert(kickRotation, entry)
+                table.insert(gs.rotation, entry)
             end
         end
     end
 
+    if groupIdx == 1 then kickRotation = gs.rotation end
+
     KT:RebuildGroupMapping()
 
-    currentIdx = 1
-    wipe(kickCDState)
+    gs.currentIdx = 1
+    wipe(gs.cdState)
+    if groupIdx == 1 then currentIdx = 1; kickCDState = gs.cdState end
 
-    -- Save to config
     local saveData = {}
-    for _, r in ipairs(kickRotation) do
+    for _, r in ipairs(gs.rotation) do
         table.insert(saveData, { name = r.name, class = r.class })
     end
-    Config:Set("kickRotation", saveData)
+    Config:Set(CfgKey("kickRotation", groupIdx), saveData)
+
+    ResolveMyGroup()
 
     local names_str = {}
-    for _, r in ipairs(kickRotation) do
+    for _, r in ipairs(gs.rotation) do
         table.insert(names_str, r.name)
     end
-    Log:Log("INFO", "Kick rotation set: " .. table.concat(names_str, " > "))
-    print("|cFF88CCFF[HexCD]|r Kick rotation: " .. table.concat(names_str, " > "))
+    local groupLabel = groupIdx > 1 and (" (group " .. groupIdx .. ")") or ""
+    Log:Log("INFO", "Kick rotation set" .. groupLabel .. ": " .. table.concat(names_str, " > "))
+    print("|cFF88CCFF[HexCD]|r Kick rotation" .. groupLabel .. ": " .. table.concat(names_str, " > "))
 end
 
 function KT:RebuildGroupMapping()
@@ -291,28 +393,32 @@ function KT:RebuildGroupMapping()
         end
     end
 
-    for i, entry in ipairs(kickRotation) do
-        for unit in pairs(groupUnits) do
-            local ok, unitName = pcall(UnitName, unit)
-            if ok and StripRealm(unitName) == entry.name then
-                rotationUnitMap[i] = unit
-                if not entry.class then
-                    local _, className = UnitClass(unit)
-                    if className and not issecretvalue(className) then
-                        entry.class = className:sub(1,1):upper() .. className:sub(2):lower()
+    for gi = 1, MAX_GROUPS do
+        local gs = groups[gi]
+        wipe(gs.unitMap)
+        for i, entry in ipairs(gs.rotation) do
+            for unit in pairs(groupUnits) do
+                local ok, unitName = pcall(UnitName, unit)
+                if ok and StripRealm(unitName) == entry.name then
+                    gs.unitMap[i] = unit
+                    if not entry.class then
+                        local _, className = UnitClass(unit)
+                        if className and not issecretvalue(className) then
+                            entry.class = className:sub(1,1):upper() .. className:sub(2):lower()
+                        end
                     end
+                    if entry.class and KICK_SPELLS[entry.class] then
+                        local info = KICK_SPELLS[entry.class]
+                        entry.spellID = info.spellID
+                        entry.cd = info.cd
+                        entry.kickName = info.name
+                    end
+                    break
                 end
-                -- Resolve kick spell info
-                if entry.class and KICK_SPELLS[entry.class] then
-                    local info = KICK_SPELLS[entry.class]
-                    entry.spellID = info.spellID
-                    entry.cd = info.cd
-                    entry.kickName = info.name
-                end
-                break
             end
         end
     end
+    rotationUnitMap = groups[1].unitMap
 end
 
 ------------------------------------------------------------------------
@@ -372,76 +478,86 @@ end
 ------------------------------------------------------------------------
 
 function KT:UpdateDisplay()
-    if visibilityState == "HIDDEN" then return end
-    if #kickRotation == 0 then return end
-
-    local now = GetTime()
     local barWidth = Config:Get("kickBarWidth") or 210
     local barHeight = Config:Get("kickBarHeight") or 20
+    local now = GetTime()
 
-    -- Active kicker is locked after each kick event (lowest CD wins)
-    local activeIdx = currentIdx
+    for gi = 1, MAX_GROUPS do
+        local gs = groups[gi]
+        if not gs.anchorFrame then break end
 
-    -- Update header
-    local nextName = (activeIdx and kickRotation[activeIdx]) and kickRotation[activeIdx].name or "?"
-    headerText:SetText("|cFF88CCFFKICK|r  |cFFFFCC00" .. nextName .. "'s turn|r")
+        if gs.visibilityState == "HIDDEN" or #gs.rotation == 0 then
+            gs.anchorFrame:Hide()
+            for _, bar in ipairs(gs.bars) do bar:Hide(); bar._active = false end
+        else
+            gs.anchorFrame:Show()
 
-    local HEADER_HEIGHT = 20
-    local GAP = 4
-    local BAR_SPACING = barHeight + 4
-    local yPos = -(HEADER_HEIGHT + GAP)
-    for i = 1, BAR_POOL_SIZE do
-        local bar = kickerBars[i]
-        local entry = kickRotation[i]
+            local activeIdx = gs.currentIdx
+            local nextName = (activeIdx and gs.rotation[activeIdx]) and gs.rotation[activeIdx].name or "?"
+            local groupTag = gi > 1 and (" G" .. gi) or ""
+            gs.headerText:SetText("|cFF88CCFFKICK" .. groupTag .. "|r  |cFFFFCC00" .. nextName .. "'s turn|r")
 
-        if entry then
-            local ready, remaining = IsKickerReady(i)
-            local unit = rotationUnitMap[i]
-            local isDead = unit and UnitExists(unit) and UnitIsDeadOrGhost(unit)
+            local HEADER_HEIGHT = 20
+            local GAP = 4
+            local BAR_SPACING = barHeight + 4
+            local yPos = -(HEADER_HEIGHT + GAP)
 
-            if isDead then
-                bar:Hide()
-                bar._active = false
-            else
-                bar._active = true
-                bar:ClearAllPoints()
-                bar:SetPoint("TOPLEFT", anchorFrame, "TOPLEFT", 4, yPos)
-                bar:SetSize(barWidth - 8, barHeight)
-                bar:Show()
-                yPos = yPos - BAR_SPACING
+            for i = 1, BAR_POOL_SIZE do
+                local bar = gs.bars[i]
+                local entry = gs.rotation[i]
 
-                local kickSpellName = entry.kickName or (entry.class and KICK_SPELLS[entry.class] and KICK_SPELLS[entry.class].name) or "Interrupt"
-                bar.nameText:SetText(string.format("|cFFFFFFFF%d|r  %s |cFF888888(%s)|r", i, entry.name or "?", kickSpellName))
+                if entry then
+                    local ready = true
+                    local remaining = 0
+                    local state = gs.cdState[i]
+                    if state then
+                        remaining = math.max(0, state.readyTime - now)
+                        ready = remaining <= 0
+                    end
+                    local unit = gs.unitMap[i]
+                    local isDead = unit and UnitExists(unit) and UnitIsDeadOrGhost(unit)
 
-                if ready then
-                    bar.cdText:SetText("|cFF00FF00OK|r")
-                    bar:SetStatusBarColor(0.15, 0.4, 0.55)
-                    bar:SetValue(1)
-                else
-                    bar.cdText:SetText(string.format("|cFFFF4444%.0fs|r", remaining))
-                    bar:SetStatusBarColor(0.5, 0.1, 0.1)
-                    bar:SetValue(remaining / (entry.cd or 15))
-                end
+                    if isDead then
+                        bar:Hide()
+                        bar._active = false
+                    else
+                        bar._active = true
+                        bar:ClearAllPoints()
+                        bar:SetPoint("TOPLEFT", gs.anchorFrame, "TOPLEFT", 4, yPos)
+                        bar:SetSize(barWidth - 8, barHeight)
+                        bar:Show()
+                        yPos = yPos - BAR_SPACING
 
-                -- Gold border for active kicker (don't override CD color)
-                if i == activeIdx then
-                    bar.goldBorder:Show()
-                    if ready then
-                        bar:SetStatusBarColor(0.2, 0.5, 0.7)
+                        local kickSpellName = entry.kickName or (entry.class and KICK_SPELLS[entry.class] and KICK_SPELLS[entry.class].name) or "Interrupt"
+                        bar.nameText:SetText(string.format("|cFFFFFFFF%d|r  %s |cFF888888(%s)|r", i, entry.name or "?", kickSpellName))
+
+                        if ready then
+                            bar.cdText:SetText("|cFF00FF00OK|r")
+                            bar:SetStatusBarColor(0.15, 0.4, 0.55)
+                            bar:SetValue(1)
+                        else
+                            bar.cdText:SetText(string.format("|cFFFF4444%.0fs|r", remaining))
+                            bar:SetStatusBarColor(0.5, 0.1, 0.1)
+                            bar:SetValue(remaining / (entry.cd or 15))
+                        end
+
+                        if i == activeIdx then
+                            bar.goldBorder:Show()
+                            if ready then bar:SetStatusBarColor(0.2, 0.5, 0.7) end
+                        else
+                            bar.goldBorder:Hide()
+                        end
                     end
                 else
-                    bar.goldBorder:Hide()
+                    bar:Hide()
+                    bar._active = false
                 end
             end
-        else
-            bar:Hide()
-            bar._active = false
+
+            local totalHeight = math.abs(yPos) + GAP
+            gs.anchorFrame:SetSize(barWidth, totalHeight)
         end
     end
-
-    -- Resize anchor
-    local totalHeight = math.abs(yPos) + GAP
-    anchorFrame:SetSize(barWidth, totalHeight)
 end
 
 ------------------------------------------------------------------------
@@ -452,16 +568,26 @@ local function TransitionTo(newState)
     if newState == visibilityState then return end
     local old = visibilityState
     visibilityState = newState
+    -- Sync state to all groups
+    for gi = 1, MAX_GROUPS do
+        groups[gi].visibilityState = newState
+    end
 
     if newState == "HIDDEN" then
-        anchorFrame:Hide()
-        for _, bar in ipairs(kickerBars) do bar:Hide(); bar._active = false end
-        onUpdateFrame:Hide()
+        for gi = 1, MAX_GROUPS do
+            if groups[gi].anchorFrame then groups[gi].anchorFrame:Hide() end
+            for _, bar in ipairs(groups[gi].bars) do bar:Hide(); bar._active = false end
+        end
+        if onUpdateFrame then onUpdateFrame:Hide() end
 
     elseif newState == "ACTIVE" then
-        anchorFrame:Show()
-        anchorFrame:SetAlpha(1.0)
-        onUpdateFrame:Show()
+        for gi = 1, MAX_GROUPS do
+            if groups[gi].anchorFrame and #groups[gi].rotation > 0 then
+                groups[gi].anchorFrame:Show()
+                groups[gi].anchorFrame:SetAlpha(1.0)
+            end
+        end
+        if onUpdateFrame then onUpdateFrame:Show() end
         KT:UpdateDisplay()
         KT:CheckAlert()
     end
@@ -485,11 +611,18 @@ function KT:CheckAlert()
     local playerName = UnitName("player")
     if entry.name ~= playerName then return end
 
+    -- Only alert if CD is ready
+    local ready, remaining = IsKickerReady(activeIdx)
+    if not ready then
+        Log:Log("DEBUG", string.format("KickTracker: alert skipped — CD not ready (%.1fs remaining)", remaining))
+        return
+    end
+
     local now = GetTime()
     if now - lastAlertTime < ALERT_DEBOUNCE_SEC then return end
     lastAlertTime = now
 
-    PlaySound(SOUNDKIT.RAID_WARNING, "Master")
+    PlaySound(SOUNDKIT.UI_RAID_BOSS_WHISPER, "Master")
     Log:Log("INFO", "KickTracker: ALERT — your turn to kick!")
 end
 
@@ -504,20 +637,35 @@ local function GetAddonChannel()
     return nil
 end
 
-local function BroadcastKickCast(casterName, spellID)
+local function BroadcastKickCast(casterName, spellID, groupIdx)
     if not commsRegistered then return end
+    -- Check messaging lockdown (Midnight restriction during encounters)
+    if C_ChatInfo.InChatMessagingLockdown and C_ChatInfo.InChatMessagingLockdown() then return end
+
     local channel = GetAddonChannel()
     if not channel then return end
-    local msg = "KICK:" .. casterName .. ":" .. spellID
-    local ok, err = pcall(C_ChatInfo.SendAddonMessage, ADDON_MSG_PREFIX, msg, channel)
-    if ok then
+    local tag = "KICK" .. (groupIdx or 1)
+    local msg = tag .. ":" .. casterName .. ":" .. spellID
+    local ok, ret = pcall(C_ChatInfo.SendAddonMessage, ADDON_MSG_PREFIX, msg, channel)
+    if ok and ret ~= 0 then
         Log:Log("DEBUG", "KickTracker: broadcast kick from " .. casterName)
-    else
-        Log:Log("DEBUG", "KickTracker: broadcast failed: " .. tostring(err))
+        return
     end
+
+    -- Fallback: whisper each member individually (when PARTY/RAID blocked in instances)
+    for i = 1, GetNumGroupMembers() do
+        local unit = (IsInRaid() and "raid" or "party") .. i
+        if UnitExists(unit) then
+            local name, realm = UnitName(unit)
+            local target = realm and realm ~= "" and (name .. "-" .. realm) or name
+            pcall(C_ChatInfo.SendAddonMessage, ADDON_MSG_PREFIX, msg, "WHISPER", target)
+        end
+    end
+    Log:Log("DEBUG", "KickTracker: broadcast kick via whisper fallback")
 end
 
-function KT:BroadcastRotation()
+function KT:BroadcastRotation(groupIdx)
+    groupIdx = groupIdx or 1
     if not commsRegistered then
         print("|cFFFF0000[HexCD]|r Comms not registered — are you in a group?")
         return
@@ -527,75 +675,94 @@ function KT:BroadcastRotation()
         print("|cFFFF0000[HexCD]|r Not in a group — cannot broadcast.")
         return
     end
+    local gs = groups[groupIdx]
     local names = {}
-    for _, r in ipairs(kickRotation) do
+    for _, r in ipairs(gs.rotation) do
         table.insert(names, r.name)
     end
-    local msg = "KICKROTATION:" .. table.concat(names, ",")
+    local tag = "KICKROTATION" .. groupIdx
+    local msg = tag .. ":" .. table.concat(names, ",")
     local ok, err = pcall(C_ChatInfo.SendAddonMessage, ADDON_MSG_PREFIX, msg, channel)
     if ok then
-        print("|cFF88CCFF[HexCD]|r Kick rotation broadcast to group.")
-        Log:Log("INFO", "KickTracker: broadcast rotation: " .. table.concat(names, " > "))
+        local groupLabel = groupIdx > 1 and (" (group " .. groupIdx .. ")") or ""
+        print("|cFF88CCFF[HexCD]|r Kick rotation" .. groupLabel .. " broadcast to group.")
+        Log:Log("INFO", "KickTracker: broadcast rotation" .. groupLabel .. ": " .. table.concat(names, " > "))
     else
         print("|cFFFF0000[HexCD]|r Broadcast failed: " .. tostring(err))
     end
 end
 
-local function HandleKickByName(casterName, spellID)
-    casterName = StripRealm(casterName)
-    Log:Log("INFO", string.format("KickTracker: %s used kick (spell %s)", casterName, tostring(spellID)))
+-- Dedup window: if a kick was already recorded for this player within N seconds,
+-- skip the duplicate. Layer 3 (correlation, ~30ms) wins over Layer 4 (addon msg, ~300ms).
+local DEDUP_WINDOW = 2.0
 
-    -- Look up actual CD from spell database (handles varied CDs)
+local function HandleKickByName(casterName, spellID, groupIdx, source)
+    groupIdx = groupIdx or 1
+    source = source or "unknown"
+    local gs = groups[groupIdx]
+    casterName = StripRealm(casterName)
+    local now = GetTime()
+
     local spellInfo = KICK_SPELL_IDS[spellID]
     local spellCD = spellInfo and spellInfo.cd or 15
 
-    -- Record CD for the caster regardless of whose turn it is
-    for i, entry in ipairs(kickRotation) do
+    for i, entry in ipairs(gs.rotation) do
         if entry.name == casterName then
-            kickCDState[i] = {
-                lastTime = GetTime(),
-                readyTime = GetTime() + spellCD,
+            -- Dedup: skip if already recorded within DEDUP_WINDOW
+            local existing = gs.cdState[i]
+            if existing and (now - existing.lastTime) < DEDUP_WINDOW then
+                Log:Log("DEBUG", string.format("KickTracker: dedup %s kick from %s (already recorded %.1fs ago)",
+                    casterName, source, now - existing.lastTime))
+                return
+            end
+
+            gs.cdState[i] = {
+                lastTime = now,
+                readyTime = now + spellCD,
             }
+            Log:Log("INFO", string.format("KickTracker: %s used kick (spell %s) group %d [%s]",
+                casterName, tostring(spellID), groupIdx, source))
             break
         end
     end
 
-    -- Recompute next: whoever has the lowest CD (soonest ready), locked until next kick
-    local prevIdx = currentIdx
-    currentIdx = GetLowestCDIdx()
-    if currentIdx ~= prevIdx then
-        lastAlertTime = 0
+    local prevIdx = gs.currentIdx
+    gs.currentIdx = GetLowestCDIdx()
+    if gs.currentIdx ~= prevIdx then
+        gs.lastAlertTime = 0
     end
-    Log:Log("DEBUG", string.format("Kick next locked to #%d (%s)",
-        currentIdx, kickRotation[currentIdx] and kickRotation[currentIdx].name or "?"))
+    if groupIdx == 1 then currentIdx = gs.currentIdx; kickCDState = gs.cdState end
+    Log:Log("DEBUG", string.format("Kick next locked to #%d (%s) group %d",
+        gs.currentIdx, gs.rotation[gs.currentIdx] and gs.rotation[gs.currentIdx].name or "?", groupIdx))
 end
 
 local function HandleAddonMessage(prefix, message, _, sender)
     if prefix ~= ADDON_MSG_PREFIX then return end
 
     local senderShort = StripRealm(sender)
-
     local playerName = UnitName("player")
     if senderShort == playerName then return end
 
-    -- Handle "KICKROTATION:Name1,Name2,Name3"
-    local rotationNames = message:match("^KICKROTATION:(.+)$")
+    -- Handle "KICKROTATION1:" / "KICKROTATION2:" / legacy "KICKROTATION:"
+    local rotGi, rotationNames = message:match("^KICKROTATION(%d?):(.+)$")
     if rotationNames then
-        Log:Log("INFO", "KickTracker: received rotation from " .. senderShort .. ": " .. rotationNames)
+        local gi = tonumber(rotGi) or 1
+        Log:Log("INFO", string.format("KickTracker: received rotation group %d from %s: %s", gi, senderShort, rotationNames))
         Config:Set("kickEnabled", true)
-        KT:SetRotation(rotationNames)
-        print(string.format("|cFF88CCFF[HexCD]|r Kick rotation received from %s: %s", senderShort, rotationNames))
+        KT:SetRotation(rotationNames, gi)
+        local groupLabel = gi > 1 and (" (group " .. gi .. ")") or ""
+        print(string.format("|cFF88CCFF[HexCD]|r Kick rotation%s received from %s: %s", groupLabel, senderShort, rotationNames))
         return
     end
 
-    -- Parse "KICK:PlayerName:spellID"
-    local msgType, casterName, spellIDStr = message:match("^(%w+):(.+):(%d+)$")
-    if msgType ~= "KICK" then return end
-
-    local spellID = tonumber(spellIDStr)
-    if not KICK_SPELL_IDS[spellID] then return end
-
-    HandleKickByName(casterName, spellID)
+    -- Parse "KICK1:Name:spellID" / "KICK2:Name:spellID" / legacy "KICK:Name:spellID"
+    local kickGi, casterName, spellIDStr = message:match("^KICK(%d?):(.+):(%d+)$")
+    if casterName and spellIDStr then
+        local gi = tonumber(kickGi) or 1
+        local spellID = tonumber(spellIDStr)
+        if not KICK_SPELL_IDS[spellID] then return end
+        HandleKickByName(casterName, spellID, gi, "addon")
+    end
 end
 
 ------------------------------------------------------------------------
@@ -636,14 +803,21 @@ eventFrame:SetScript("OnEvent", function(self, event, ...)
 
     if event == "UNIT_SPELLCAST_SUCCEEDED" then
         local unit, _, spellID = ...
-        if unit == "player" and KICK_SPELL_IDS[spellID] then
-            local playerName = UnitName("player")
-            HandleKickByName(playerName, spellID)
-            BroadcastKickCast(playerName, spellID)
+        if unit == "player" then
+            -- Use taint laundering for safety (spellID may be tainted even for player)
+            local kickData, cleanID = SafeGetKickData(spellID)
+            if kickData then
+                local playerName = UnitName("player")
+                ResolveMyGroup()
+                local gi = myGroupIdx or 1
+                HandleKickByName(playerName, cleanID, gi, "self")
+                BroadcastKickCast(playerName, cleanID, gi)
+            end
         end
 
     elseif event == "GROUP_ROSTER_UPDATE" then
         KT:RebuildGroupMapping()
+        KT:AutoEnroll()
     end
 end)
 
@@ -651,12 +825,64 @@ end)
 -- Public API
 ------------------------------------------------------------------------
 
-function KT:GetRotationNames()
+--- Auto-enroll kickers based on group composition.
+--- Party: all tanks + DPS with interrupts. Raid: no auto-enrollment.
+function KT:AutoEnroll()
+    if not IsInGroup() then return end
+
+    local comp = Util.ScanGroupComposition()
+
+    -- No auto-enrollment in raid
+    if comp.isRaid then return end
+    if #comp.kickers == 0 then return end
+
+    -- Check if group 1 rotation is stale
+    local currentNames = self:GetRotationNames(1)
+    local groupSet = {}
+    for _, n in ipairs(comp.kickers) do groupSet[n] = true end
+
+    -- Always clean up stale group 2 (old party/test data)
+    local allMembers = {}
+    for _, n in ipairs(comp.kickers) do allMembers[n] = true end
+    for _, n in ipairs(comp.dispellers or {}) do allMembers[n] = true end
+    local g2names = self:GetRotationNames(2)
+    for _, n in ipairs(g2names) do
+        if not allMembers[n] then
+            groups[2].rotation = {}
+            groups[2].currentIdx = 1
+            wipe(groups[2].cdState)
+            Config:Set("kickRotation2", {})
+            Log:Log("DEBUG", "KickTracker: cleared stale group 2")
+            break
+        end
+    end
+
+    -- Check if group 1 rotation is stale
+    local stale = (#currentNames == 0)
+    if not stale then
+        for _, n in ipairs(currentNames) do
+            if not groupSet[n] then stale = true; break end
+        end
+    end
+    if not stale then return end
+
+    KT:SetRotation(comp.kickers, 1)
+    Log:Log("INFO", "KickTracker: auto-enrolled " .. #comp.kickers .. " kickers")
+end
+
+function KT:GetRotationNames(groupIdx)
+    groupIdx = groupIdx or 1
+    local gs = groups[groupIdx]
     local names = {}
-    for _, r in ipairs(kickRotation) do
+    for _, r in ipairs(gs.rotation) do
         table.insert(names, r.name)
     end
     return names
+end
+
+function KT:GetMyGroup()
+    ResolveMyGroup()
+    return myGroupIdx
 end
 
 function KT:Reset()
@@ -666,22 +892,26 @@ function KT:Reset()
 end
 
 function KT:Unlock()
-    if anchorFrame then
-        anchorFrame:EnableMouse(true)
-        anchorFrame:Show()
-        anchorFrame:SetAlpha(1.0)
-        print("|cFF88CCFF[HexCD]|r Kick tracker unlocked — drag to reposition.")
+    for gi = 1, MAX_GROUPS do
+        local af = groups[gi].anchorFrame
+        if af then
+            af:EnableMouse(true)
+            af:Show()
+            af:SetAlpha(1.0)
+        end
     end
+    print("|cFF88CCFF[HexCD]|r Kick tracker unlocked — drag to reposition.")
 end
 
 function KT:Lock()
-    if anchorFrame then
-        anchorFrame:EnableMouse(false)
-        if visibilityState == "HIDDEN" then
-            anchorFrame:Hide()
+    for gi = 1, MAX_GROUPS do
+        local af = groups[gi].anchorFrame
+        if af then
+            af:EnableMouse(false)
+            if visibilityState == "HIDDEN" then af:Hide() end
         end
-        print("|cFF88CCFF[HexCD]|r Kick tracker locked.")
     end
+    print("|cFF88CCFF[HexCD]|r Kick tracker locked.")
 end
 
 function KT:IsUnlocked()
@@ -712,23 +942,27 @@ end
 
 --- Test helper: simulate a specific player's kick cast
 function KT:SimulateCastFrom(name)
-    if #kickRotation == 0 then return end
     local playerName = UnitName("player")
-    local spellID = 6552 -- fallback to Pummel
-    for _, entry in ipairs(kickRotation) do
-        if entry.name == name then
-            spellID = entry.spellID or 6552
-            break
+    local spellID = 6552
+    local targetGroup = 1
+    for gi = 1, MAX_GROUPS do
+        for _, entry in ipairs(groups[gi].rotation) do
+            if entry.name == name then
+                spellID = entry.spellID or 6552
+                targetGroup = gi
+                break
+            end
         end
     end
     if name == playerName then
-        HandleKickByName(name, spellID)
+        HandleKickByName(name, spellID, targetGroup, "simulate")
     else
-        local fakeMessage = "KICK:" .. name .. ":" .. spellID
+        local tag = "KICK" .. targetGroup
+        local fakeMessage = tag .. ":" .. name .. ":" .. spellID
         local fakeSender = name .. "-FakeRealm"
         HandleAddonMessage(ADDON_MSG_PREFIX, fakeMessage, "PARTY", fakeSender)
     end
-    print(string.format("|cFF88CCFF[HexCD]|r Simulated %s kick", name))
+    print(string.format("|cFF88CCFF[HexCD]|r Simulated %s kick (group %d)", name, targetGroup))
 end
 
 --- Test helper: simulate an incoming kick from the current active kicker
@@ -750,7 +984,7 @@ function KT:SimulateIncomingComms()
     if entry.name == playerName then
         local spellID = entry.spellID or 6552
         print(string.format("|cFF88CCFF[HexCD]|r Simulating YOUR kick (%s, spell %d)", entry.name, spellID))
-        HandleKickByName(entry.name, spellID)
+        HandleKickByName(entry.name, spellID, 1, "simulate")
     else
         local spellID = entry.spellID or 6552
         local fakeMessage = "KICK:" .. entry.name .. ":" .. spellID
@@ -762,4 +996,28 @@ function KT:SimulateIncomingComms()
     if kickRotation[currentIdx] then
         print(string.format("|cFF88CCFF[HexCD]|r Next kicker: #%d %s", currentIdx, kickRotation[currentIdx].name))
     end
+end
+
+------------------------------------------------------------------------
+-- Test helpers
+------------------------------------------------------------------------
+
+function KT:_testGetState(groupIdx)
+    groupIdx = groupIdx or 1
+    local gs = groups[groupIdx]
+    return {
+        bars = gs.bars,
+        cdState = gs.cdState,
+        currentIdx = gs.currentIdx,
+        rotation = gs.rotation,
+        visibilityState = gs.visibilityState,
+    }
+end
+
+function KT:_testHandleKick(name, spellID, groupIdx)
+    HandleKickByName(name, spellID, groupIdx or 1, "test")
+end
+
+function KT:_testInjectMessage(msg, sender)
+    HandleAddonMessage(ADDON_MSG_PREFIX, msg, "PARTY", sender or "Test-Realm")
 end

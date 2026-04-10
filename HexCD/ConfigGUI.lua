@@ -170,17 +170,27 @@ local function CreateRotationControls(parent, yOffset, tracker, configPrefix, si
     CreateSectionHeader(parent, "Rotation", y)
     y = y - 22
 
-    local saved = Config:Get(configPrefix .. "Rotation") or {}
-    local nameStr = ""
-    if #saved > 0 then
-        local names = {}
-        for _, r in ipairs(saved) do
-            table.insert(names, r.name or r)
+    -- Build initial text from saved config: "Group1Names ; Group2Names"
+    local function BuildNameStr()
+        local parts = {}
+        for gi = 1, 2 do
+            local key = gi == 1 and (configPrefix .. "Rotation") or (configPrefix .. "Rotation2")
+            local saved = Config:Get(key) or {}
+            if #saved > 0 then
+                local names = {}
+                for _, r in ipairs(saved) do table.insert(names, r.name or r) end
+                table.insert(parts, table.concat(names, ","))
+            end
         end
-        nameStr = table.concat(names, ", ")
+        return table.concat(parts, " ; ")
     end
 
-    local namesBox = CreateSettingsEditBox(parent, "Names (comma-separated):", nameStr, 400, y)
+    local helpText = parent:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
+    helpText:SetPoint("TOPLEFT", 16, y)
+    helpText:SetText("|cFF888888Format: Group1Names ; Group2Names   (semicolon separates groups)|r")
+    y = y - 16
+
+    local namesBox = CreateSettingsEditBox(parent, "Names:", BuildNameStr(), 450, y)
     y = y - 50
 
     local function MakeBtn(label, width, xOff, onClick)
@@ -192,82 +202,119 @@ local function CreateRotationControls(parent, yOffset, tracker, configPrefix, si
         return btn
     end
 
-    local rotLabel = parent:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
-    rotLabel:SetPoint("TOPLEFT", 16, y)
-    rotLabel:SetJustifyH("LEFT")
+    -- Parse "A,B,C ; D,E,F" into two group strings
+    local function ParseGroups(text)
+        local g1, g2 = "", ""
+        local semicolonPos = text:find(";")
+        if semicolonPos then
+            g1 = text:sub(1, semicolonPos - 1):match("^%s*(.-)%s*$") or ""
+            g2 = text:sub(semicolonPos + 1):match("^%s*(.-)%s*$") or ""
+        else
+            g1 = text:match("^%s*(.-)%s*$") or ""
+        end
+        return g1, g2
+    end
+
+    local function ApplyRotation()
+        local text = namesBox._editBox:GetText()
+        if text == "" then return end
+        local g1, g2 = ParseGroups(text)
+        Config:Set(configPrefix .. "Enabled", true)
+        if g1 ~= "" then tracker:SetRotation(g1, 1) end
+        if g2 ~= "" then
+            tracker:SetRotation(g2, 2)
+        end
+    end
+
+    -- Labels for each group's current rotation
+    local rotLabel1 = parent:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
+    rotLabel1:SetJustifyH("LEFT")
+    local rotLabel2 = parent:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
+    rotLabel2:SetJustifyH("LEFT")
 
     local simBtnContainer = CreateFrame("Frame", nil, parent)
-    simBtnContainer:SetSize(560, 30)
-    simBtnContainer:SetPoint("TOPLEFT", parent, "TOPLEFT", 0, y)
+    simBtnContainer:SetSize(560, 60)
     local simButtons = {}
 
     local function RebuildSimButtons()
-        for _, btn in ipairs(simButtons) do btn:Hide(); btn:SetParent(nil) end
+        for _, btn in ipairs(simButtons) do
+            if btn.Hide then btn:Hide() end
+            if btn.SetParent then btn:SetParent(nil) end
+        end
         wipe(simButtons)
-        local names = tracker.GetRotationNames and tracker:GetRotationNames() or {}
-        if #names == 0 then
-            rotLabel:SetText("|cFF888888No rotation set|r")
-            simBtnContainer:SetHeight(1)
-            return 0
-        end
-        rotLabel:SetText("|cFF" .. colorHex .. "Current:|r " .. table.concat(names, " > "))
-        local simLabel = simBtnContainer:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-        simLabel:SetPoint("TOPLEFT", 16, -4)
-        simLabel:SetText("Simulate cast:")
-        table.insert(simButtons, simLabel)
-        local xOff = 100
-        for _, name in ipairs(names) do
-            local btnW = math.max(70, #name * 7 + 16)
-            local btn = CreateFrame("Button", nil, simBtnContainer, "UIPanelButtonTemplate")
-            btn:SetSize(btnW, 22)
-            btn:SetPoint("TOPLEFT", simBtnContainer, "TOPLEFT", xOff, 0)
-            btn:SetText(name)
-            btn:SetScript("OnClick", function()
-                if tracker.SimulateCastFrom then
-                    Config:Set(configPrefix .. "Enabled", true)
-                    tracker:SimulateCastFrom(name)
+
+        local totalHeight = 0
+        for gi = 1, 2 do
+            local names = tracker.GetRotationNames and tracker:GetRotationNames(gi) or {}
+            local label = gi == 1 and rotLabel1 or rotLabel2
+            if #names > 0 then
+                local groupTag = gi > 1 and " (G2)" or ""
+                label:SetText("|cFF" .. colorHex .. "Group " .. gi .. ":|r " .. table.concat(names, " > "))
+                label:Show()
+
+                -- Simulate buttons for this group
+                local xOff = 16
+                for _, name in ipairs(names) do
+                    local btnW = math.max(60, #name * 7 + 12)
+                    local btn = CreateFrame("Button", nil, simBtnContainer, "UIPanelButtonTemplate")
+                    btn:SetSize(btnW, 20)
+                    btn:SetPoint("TOPLEFT", simBtnContainer, "TOPLEFT", xOff, -totalHeight)
+                    btn:SetText(name)
+                    btn:SetScript("OnClick", function()
+                        if tracker.SimulateCastFrom then
+                            Config:Set(configPrefix .. "Enabled", true)
+                            tracker:SimulateCastFrom(name)
+                        end
+                    end)
+                    table.insert(simButtons, btn)
+                    xOff = xOff + btnW + 3
                 end
-            end)
-            table.insert(simButtons, btn)
-            xOff = xOff + btnW + 4
+                totalHeight = totalHeight + 24
+            else
+                label:SetText("|cFF888888Group " .. gi .. ": not set|r")
+                label:Show()
+                totalHeight = totalHeight + 16
+            end
         end
-        simBtnContainer:SetHeight(26)
-        return 26
+        simBtnContainer:SetHeight(math.max(totalHeight, 4))
+        return totalHeight
     end
 
     -- Operational buttons
     MakeBtn("Set Rotation", 110, 16, function()
-        local text = namesBox._editBox:GetText()
-        if text == "" then return end
-        Config:Set(configPrefix .. "Enabled", true)
-        tracker:SetRotation(text)
+        ApplyRotation()
         RebuildSimButtons()
     end)
-    MakeBtn("Broadcast", 90, 132, function()
-        if tracker.BroadcastRotation then tracker:BroadcastRotation() end
+    MakeBtn("Broadcast All", 100, 132, function()
+        if tracker.BroadcastRotation then
+            tracker:BroadcastRotation(1)
+            local g2names = tracker.GetRotationNames and tracker:GetRotationNames(2) or {}
+            if #g2names > 0 then tracker:BroadcastRotation(2) end
+        end
     end)
     y = y - 30
 
-    rotLabel:ClearAllPoints()
-    rotLabel:SetPoint("TOPLEFT", 16, y)
-    y = y - 22
+    rotLabel1:ClearAllPoints()
+    rotLabel1:SetPoint("TOPLEFT", 16, y)
+    y = y - 16
+    rotLabel2:ClearAllPoints()
+    rotLabel2:SetPoint("TOPLEFT", 16, y)
+    y = y - 20
 
     -- Testing section
     CreateSectionHeader(parent, "Testing", y)
     y = y - 22
 
+    local isDispel = (configPrefix == "dispel")
     local durBox = CreateSettingsEditBox(parent, "Duration (sec):", "15", 80, y)
-    local countBox = CreateSettingsEditBox(parent, "# Debuffs:", "4", 60, y, 200)
+    local countBox = CreateSettingsEditBox(parent, isDispel and "# Debuffs:" or "# Events:", "4", 60, y, 200)
     y = y - 50
 
     MakeBtn("Start Test", 90, 16, function()
-        local text = namesBox._editBox:GetText()
-        if text == "" then return end
+        ApplyRotation()
+        RebuildSimButtons()
         local dur = tonumber(durBox._editBox:GetText()) or 15
         local count = tonumber(countBox._editBox:GetText()) or 4
-        Config:Set(configPrefix .. "Enabled", true)
-        tracker:SetRotation(text)
-        RebuildSimButtons()
         tracker[simulateFnName](tracker, dur, count)
     end)
     y = y - 30

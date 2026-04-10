@@ -11,7 +11,7 @@ local DEFAULTS = {
     logLevel = "INFO",             -- OFF, ERRORS, INFO, DEBUG, TRACE
 
     -- Dispel Tracker
-    dispelEnabled = false,
+    dispelEnabled = true,
     dispelRotation = {},
     dispelAlertEnabled = true,
     dispelAnchorPoint = "CENTER",
@@ -20,8 +20,14 @@ local DEFAULTS = {
     dispelBarWidth = 210,
     dispelBarHeight = 20,
 
+    -- Dispel Tracker — Group 2
+    dispelRotation2 = {},
+    dispelAnchorPoint2 = "CENTER",
+    dispelAnchorX2 = 300,
+    dispelAnchorY2 = -80,
+
     -- Kick Tracker
-    kickEnabled = false,
+    kickEnabled = true,
     kickRotation = {},
     kickAlertEnabled = true,
     kickAnchorPoint = "CENTER",
@@ -29,6 +35,12 @@ local DEFAULTS = {
     kickAnchorY = 0,
     kickBarWidth = 210,
     kickBarHeight = 20,
+
+    -- Kick Tracker — Group 2
+    kickRotation2 = {},
+    kickAnchorPoint2 = "CENTER",
+    kickAnchorX2 = -300,
+    kickAnchorY2 = -80,
 
     -- Party CD Display
     partyCDAnchorSide = "RIGHT",

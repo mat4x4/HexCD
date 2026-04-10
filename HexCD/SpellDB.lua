@@ -93,6 +93,8 @@ local PARTY_STACKED = {
 local HEALING = {
     [740]    = { name = "Tranquility",          cd = 180, class = "DRUID" },
     [391528] = { name = "Convoke the Spirits",  cd = 60,  class = "DRUID" },
+    [132158] = { name = "Nature's Swiftness",   cd = 60,  class = "DRUID" },
+    [102342] = { name = "Ironbark",             cd = 60,  class = "DRUID" },
     [33891]  = { name = "Incarnation: ToL",     cd = 180, class = "DRUID" },
     [197721] = { name = "Flourish",             cd = 90,  class = "DRUID" },
     [64843]  = { name = "Divine Hymn",          cd = 180, class = "PRIEST" },

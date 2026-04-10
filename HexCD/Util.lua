@@ -120,3 +120,196 @@ function Util.DeepCopy(t)
     end
     return copy
 end
+
+------------------------------------------------------------------------
+-- Group Composition Helpers
+------------------------------------------------------------------------
+
+--- Classes that have healer dispels (magic)
+local DISPEL_CLASSES = {
+    DRUID = true, PRIEST = true, PALADIN = true, SHAMAN = true, MONK = true, EVOKER = true,
+}
+
+--- Classes that have interrupts
+local INTERRUPT_CLASSES = {
+    DRUID = true, MAGE = true, ROGUE = true, WARRIOR = true, DEATHKNIGHT = true,
+    PALADIN = true, MONK = true, SHAMAN = true, DEMONHUNTER = true, EVOKER = true,
+    HUNTER = false, WARLOCK = false, PRIEST = false,  -- no baseline interrupt
+}
+
+--- Scan group members and return lists for auto-enrollment.
+--- @return table { dispellers = {name,...}, kickers = {name,...}, healers = {name,...}, isRaid = bool }
+function Util.ScanGroupComposition()
+    local result = { dispellers = {}, kickers = {}, healers = {}, isRaid = false }
+
+    local inRaid = IsInRaid and IsInRaid()
+    result.isRaid = inRaid and true or false
+
+    local units = {}
+    if inRaid then
+        for i = 1, 40 do
+            local unit = "raid" .. i
+            if UnitExists(unit) then table.insert(units, unit) end
+        end
+    else
+        table.insert(units, "player")
+        for i = 1, 4 do
+            local unit = "party" .. i
+            if UnitExists(unit) then table.insert(units, unit) end
+        end
+    end
+
+    for _, unit in ipairs(units) do
+        local ok, name = pcall(UnitName, unit)
+        if ok and name and name ~= "" and not (issecretvalue and issecretvalue(name)) then
+            local shortName = name:match("^([^-]+)") or name
+            local _, className = UnitClass(unit)
+            if className and not (issecretvalue and issecretvalue(className)) then
+                className = className:upper()
+
+                -- Check role
+                local role = nil
+                pcall(function()
+                    role = UnitGroupRolesAssigned and UnitGroupRolesAssigned(unit)
+                end)
+                local hasRole = role and role ~= "NONE" and role ~= ""
+
+                local isHealer = (role == "HEALER")
+                local isTank = (role == "TANK")
+
+                if hasRole then
+                    -- Roles are assigned (M+ queue, raid)
+                    if isHealer and DISPEL_CLASSES[className] then
+                        table.insert(result.dispellers, shortName)
+                    end
+                    if isHealer then
+                        table.insert(result.healers, shortName)
+                    end
+                    if (isTank or not isHealer) and INTERRUPT_CLASSES[className] then
+                        table.insert(result.kickers, shortName)
+                    end
+                else
+                    -- No roles set (manual invite, open world)
+                    -- Enroll everyone with the capability
+                    if DISPEL_CLASSES[className] then
+                        table.insert(result.dispellers, shortName)
+                    end
+                    if INTERRUPT_CLASSES[className] then
+                        table.insert(result.kickers, shortName)
+                    end
+                end
+            end
+        end
+    end
+
+    return result
+end
+
+------------------------------------------------------------------------
+-- Shared Tracker UI Helpers
+------------------------------------------------------------------------
+
+--- Create a movable anchor frame for a tracker overlay.
+---@param name string Global frame name
+---@param bgColor table {r, g, b, a}
+---@param borderColor table {r, g, b, a}
+---@param defaultPoint string
+---@param defaultX number
+---@param defaultY number
+---@param savedPointKey string Config key for saved position
+---@param savedXKey string
+---@param savedYKey string
+---@return Frame
+function Util.CreateTrackerAnchor(name, bgColor, borderColor, defaultPoint, defaultX, defaultY, savedPointKey, savedXKey, savedYKey)
+    local Config = HexCD.Config
+    local f = CreateFrame("Frame", name, UIParent, "BackdropTemplate")
+    f:SetSize(210, 80)
+    f:SetBackdrop({
+        bgFile = "Interface\\DialogFrame\\UI-DialogBox-Background",
+        edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border",
+        edgeSize = 10,
+        insets = { left = 2, right = 2, top = 2, bottom = 2 },
+    })
+    f:SetBackdropColor(bgColor[1], bgColor[2], bgColor[3], bgColor[4] or 0.9)
+    f:SetBackdropBorderColor(borderColor[1], borderColor[2], borderColor[3], borderColor[4] or 0.8)
+    f:SetMovable(true)
+    f:EnableMouse(false)
+    f:RegisterForDrag("LeftButton")
+    f:SetScript("OnDragStart", function(self) self:StartMoving() end)
+    f:SetScript("OnDragStop", function(self)
+        self:StopMovingOrSizing()
+        local p, _, _, px, py = self:GetPoint()
+        if Config then
+            Config:Set(savedPointKey, p)
+            Config:Set(savedXKey, px)
+            Config:Set(savedYKey, py)
+        end
+    end)
+
+    -- Restore saved position
+    local savedP = Config and Config:Get(savedPointKey)
+    if savedP then
+        f:ClearAllPoints()
+        f:SetPoint(savedP, UIParent, savedP,
+            Config:Get(savedXKey) or defaultX,
+            Config:Get(savedYKey) or defaultY)
+    else
+        f:SetPoint(defaultPoint, UIParent, defaultPoint, defaultX, defaultY)
+    end
+
+    f:Hide()
+    return f
+end
+
+--- Create a status bar for a tracker rotation entry.
+---@param name string Global frame name
+---@return StatusBar
+function Util.CreateTrackerBar(name)
+    local bar = CreateFrame("StatusBar", name, nil, "BackdropTemplate")
+    bar:SetSize(200, 20)
+    bar:SetStatusBarTexture("Interface\\TargetingFrame\\UI-StatusBar")
+    bar:SetMinMaxValues(0, 1)
+    bar:SetValue(1)
+    bar:Hide()
+
+    bar:SetBackdrop({
+        bgFile = "Interface\\DialogFrame\\UI-DialogBox-Background",
+        edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border",
+        edgeSize = 8,
+        insets = { left = 2, right = 2, top = 2, bottom = 2 },
+    })
+    bar:SetBackdropColor(0.1, 0.1, 0.15, 0.85)
+    bar:SetBackdropBorderColor(0.3, 0.3, 0.35, 0.6)
+
+    local bg = bar:CreateTexture(nil, "BACKGROUND")
+    bg:SetAllPoints()
+    bg:SetColorTexture(0.05, 0.05, 0.08, 0.9)
+    bar.bg = bg
+
+    local cdText = bar:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    cdText:SetPoint("RIGHT", -6, 0)
+    cdText:SetJustifyH("RIGHT")
+    bar.cdText = cdText
+
+    local nameText = bar:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    nameText:SetPoint("LEFT", 6, 0)
+    nameText:SetPoint("RIGHT", cdText, "LEFT", -4, 0)
+    nameText:SetJustifyH("LEFT")
+    nameText:SetWordWrap(false)
+    nameText:SetMaxLines(1)
+    bar.nameText = nameText
+
+    local goldBorder = CreateFrame("Frame", nil, bar, "BackdropTemplate")
+    goldBorder:SetPoint("TOPLEFT", -3, 3)
+    goldBorder:SetPoint("BOTTOMRIGHT", 3, -3)
+    goldBorder:SetBackdrop({
+        edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border",
+        edgeSize = 12,
+    })
+    goldBorder:SetBackdropBorderColor(1.0, 0.84, 0.0, 1.0)
+    goldBorder:Hide()
+    bar.goldBorder = goldBorder
+
+    bar._active = false
+    return bar
+end

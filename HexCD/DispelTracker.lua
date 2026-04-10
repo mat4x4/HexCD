@@ -47,86 +47,59 @@ local ADDON_MSG_PREFIX = "HexCD"
 local commsRegistered = false
 
 ------------------------------------------------------------------------
--- State
+-- Per-Group State (2 groups for raid use)
 ------------------------------------------------------------------------
 
-local dispelRotation = {}       -- { {name, class, spellID, cd}, ... }
-local currentIdx = 1            -- who's next in rotation
+local MAX_GROUPS = 2
+
+local function NewGroupState()
+    return {
+        rotation = {},          -- { {name, class, spellID, cd}, ... }
+        currentIdx = 1,
+        cdState = {},           -- rotationIdx → {lastTime, readyTime}
+        unitMap = {},           -- rotationIdx → unitToken
+        visibilityState = "HIDDEN",
+        inactiveTimer = nil,
+        lastAlertTime = 0,
+        -- UI (created lazily)
+        bars = {},
+        debuffEntries = {},
+        anchorFrame = nil,
+        headerText = nil,
+        onUpdateFrame = nil,
+        onUpdateThrottle = 0,
+    }
+end
+
+local groups = { NewGroupState(), NewGroupState() }
+local myGroupIdx = nil          -- which group the local player is in (nil = none)
+
+-- Shared state (not per-group)
 local activeDebuffs = {}        -- unit → { auraInstanceID → {name, dispelType, expirationTime} }
-local dispelCDState = {}        -- rotationIdx → {lastTime, readyTime}
-local visibilityState = "HIDDEN"
-local inactiveTimer = nil
-local lastAlertTime = 0
 local totalDebuffCount = 0
-
--- Frame pools
-local dispellerBars = {}        -- pre-allocated bar frames
-local debuffEntries = {}        -- pre-allocated debuff text frames
-local anchorFrame = nil
-local headerText = nil
--- (allClearText removed — INACTIVE uses headerText)
-local onUpdateFrame = nil
-local onUpdateThrottle = 0
-
--- Group unit mapping
 local groupUnits = {}           -- unit tokens for current group
-local rotationUnitMap = {}      -- rotationIdx → unitToken
+
+-- Backward-compat aliases — point to group 1 for code that hasn't been refactored yet
+local dispelRotation = groups[1].rotation
+local currentIdx = groups[1].currentIdx
+local dispelCDState = groups[1].cdState
+local dispellerBars = groups[1].bars
+local debuffEntries = groups[1].debuffEntries
+local anchorFrame = groups[1].anchorFrame
+local headerText = groups[1].headerText
+local visibilityState = groups[1].visibilityState
+local inactiveTimer = groups[1].inactiveTimer
+local lastAlertTime = groups[1].lastAlertTime
+local onUpdateFrame = groups[1].onUpdateFrame
+local onUpdateThrottle = groups[1].onUpdateThrottle
+local rotationUnitMap = groups[1].unitMap
 
 ------------------------------------------------------------------------
 -- Bar Creation (follows TimerBars.lua pattern)
 ------------------------------------------------------------------------
 
 local function CreateDispellerBar(index)
-    local bar = CreateFrame("StatusBar", "HexCDDispelBar" .. index, nil, "BackdropTemplate")
-    bar:SetSize(200, 20)
-    bar:SetStatusBarTexture("Interface\\TargetingFrame\\UI-StatusBar")
-    bar:SetMinMaxValues(0, 1)
-    bar:SetValue(1)
-    bar:Hide()
-
-    bar:SetBackdrop({
-        bgFile = "Interface\\DialogFrame\\UI-DialogBox-Background",
-        edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border",
-        edgeSize = 8,
-        insets = { left = 2, right = 2, top = 2, bottom = 2 },
-    })
-    bar:SetBackdropColor(0.1, 0.1, 0.15, 0.85)
-    bar:SetBackdropBorderColor(0.3, 0.3, 0.35, 0.6)
-
-    -- Background
-    local bg = bar:CreateTexture(nil, "BACKGROUND")
-    bg:SetAllPoints()
-    bg:SetColorTexture(0.05, 0.05, 0.08, 0.9)
-    bar.bg = bg
-
-    -- CD/Ready text (right)
-    local cdText = bar:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-    cdText:SetPoint("RIGHT", -6, 0)
-    cdText:SetJustifyH("RIGHT")
-    bar.cdText = cdText
-
-    -- Number + name text (left, stretches to cdText)
-    local nameText = bar:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-    nameText:SetPoint("LEFT", 6, 0)
-    nameText:SetPoint("RIGHT", cdText, "LEFT", -4, 0)
-    nameText:SetJustifyH("LEFT")
-    bar.nameText = nameText
-
-    -- Gold border overlay (for #1 dispeller)
-    local goldBorder = CreateFrame("Frame", nil, bar, "BackdropTemplate")
-    goldBorder:SetPoint("TOPLEFT", -3, 3)
-    goldBorder:SetPoint("BOTTOMRIGHT", 3, -3)
-    goldBorder:SetBackdrop({
-        edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border",
-        edgeSize = 12,
-    })
-    goldBorder:SetBackdropBorderColor(1.0, 0.84, 0.0, 1.0)
-    goldBorder:Hide()
-    bar.goldBorder = goldBorder
-
-    bar._active = false
-    bar._index = index
-    return bar
+    return Util.CreateTrackerBar("HexCDDispelBar" .. index)
 end
 
 local function CreateDebuffEntry(index)
@@ -148,48 +121,15 @@ end
 -- Anchor Frame
 ------------------------------------------------------------------------
 
-local function CreateAnchor()
-    local f = CreateFrame("Frame", "HexCDDispelAnchor", UIParent, "BackdropTemplate")
-    f:SetSize(210, 24)
-    f:SetBackdrop({
-        bgFile = "Interface\\DialogFrame\\UI-DialogBox-Background",
-        edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border",
-        edgeSize = 8,
-        insets = { left = 2, right = 2, top = 2, bottom = 2 },
-    })
-    f:SetBackdropColor(0.08, 0.08, 0.12, 0.9)
-    f:SetBackdropBorderColor(0.4, 0.3, 0.6, 0.8)
-
-    -- Header text
-    headerText = f:CreateFontString(nil, "OVERLAY", "GameFontNormal")
-    headerText:SetPoint("TOPLEFT", 8, -4)
-    headerText:SetPoint("RIGHT", -8, 0)
-    headerText:SetJustifyH("LEFT")
-    headerText:SetText("|cFFCC88FFDISPEL|r")
-
-    -- (allClearText removed — INACTIVE state uses headerText directly)
-
-    -- Position from config
-    local point = Config:Get("dispelAnchorPoint") or "CENTER"
-    local x = Config:Get("dispelAnchorX") or 300
-    local y = Config:Get("dispelAnchorY") or 0
-    f:SetPoint(point, UIParent, point, x, y)
-
-    -- Draggable (unlock/lock)
-    f:SetMovable(true)
-    f:EnableMouse(false) -- disabled by default (locked)
-    f:RegisterForDrag("LeftButton")
-    f:SetScript("OnDragStart", function(self) self:StartMoving() end)
-    f:SetScript("OnDragStop", function(self)
-        self:StopMovingOrSizing()
-        local p, _, _, px, py = self:GetPoint()
-        Config:Set("dispelAnchorPoint", p)
-        Config:Set("dispelAnchorX", px)
-        Config:Set("dispelAnchorY", py)
-    end)
-
-    f:Hide()
-    return f
+local dispelAnchorCount = 0
+local function CreateAnchor(pointKey, xKey, yKey, defaultX, defaultY)
+    dispelAnchorCount = dispelAnchorCount + 1
+    pointKey = pointKey or "dispelAnchorPoint"
+    xKey = xKey or "dispelAnchorX"
+    yKey = yKey or "dispelAnchorY"
+    defaultX = defaultX or 300
+    defaultY = defaultY or 0
+    return Util.CreateTrackerAnchor("HexCDDispelAnchor" .. dispelAnchorCount, {0.08, 0.08, 0.12}, {0.4, 0.3, 0.6}, "CENTER", defaultX, defaultY, pointKey, xKey, yKey)
 end
 
 ------------------------------------------------------------------------
@@ -197,19 +137,34 @@ end
 ------------------------------------------------------------------------
 
 function DT:Init()
-    anchorFrame = CreateAnchor()
+    -- Create UI for both groups
+    for gi = 1, MAX_GROUPS do
+        local gs = groups[gi]
+        local suffix = gi == 1 and "" or "2"
+        local defY = gi == 1 and 0 or -80
+        gs.anchorFrame = CreateAnchor("dispelAnchorPoint" .. suffix, "dispelAnchorX" .. suffix, "dispelAnchorY" .. suffix, 300, defY)
 
-    -- Create bar pool (parented to anchor so they move together)
-    for i = 1, DISPELLER_BAR_POOL_SIZE do
-        dispellerBars[i] = CreateDispellerBar(i)
-        dispellerBars[i]:SetParent(anchorFrame)
+        gs.bars = {}
+        for i = 1, DISPELLER_BAR_POOL_SIZE do
+            gs.bars[i] = CreateDispellerBar(i)
+            gs.bars[i]:SetParent(gs.anchorFrame)
+        end
+
+        gs.debuffEntries = {}
+        for i = 1, DEBUFF_ENTRY_POOL_SIZE do
+            gs.debuffEntries[i] = CreateDebuffEntry(i)
+            gs.debuffEntries[i]:SetParent(gs.anchorFrame)
+        end
+
+        gs.headerText = gs.anchorFrame:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+        gs.headerText:SetPoint("TOP", 0, -2)
     end
 
-    -- Create debuff entry pool (parented to anchor)
-    for i = 1, DEBUFF_ENTRY_POOL_SIZE do
-        debuffEntries[i] = CreateDebuffEntry(i)
-        debuffEntries[i]:SetParent(anchorFrame)
-    end
+    -- Backward compat aliases
+    anchorFrame = groups[1].anchorFrame
+    dispellerBars = groups[1].bars
+    debuffEntries = groups[1].debuffEntries
+    headerText = groups[1].headerText
 
     -- Register addon message prefix for cross-client dispel sync
     if C_ChatInfo and C_ChatInfo.RegisterAddonMessagePrefix then
@@ -224,7 +179,7 @@ function DT:Init()
 
     -- OnUpdate frame for CD ticking (only runs in ACTIVE state)
     onUpdateFrame = CreateFrame("Frame", "HexCDDispelOnUpdate")
-    onUpdateFrame:Hide()
+    if onUpdateFrame then onUpdateFrame:Hide() end
     onUpdateFrame:SetScript("OnUpdate", function(_, elapsed)
         onUpdateThrottle = onUpdateThrottle + elapsed
         if onUpdateThrottle < UPDATE_THROTTLE then return end
@@ -232,11 +187,16 @@ function DT:Init()
         DT:UpdateDisplay()
     end)
 
-    -- Load rotation from saved config
+    -- Load rotation from saved config, or auto-enroll
     local saved = Config:Get("dispelRotation")
     if saved and #saved > 0 then
         DT:SetRotation(saved)
     end
+    local saved2 = Config:Get("dispelRotation2")
+    if saved2 and #saved2 > 0 then
+        DT:SetRotation(saved2, 2)
+    end
+    DT:AutoEnroll()
 
     Log:Log("DEBUG", "DispelTracker initialized")
 end
@@ -245,43 +205,71 @@ end
 -- Rotation Management
 ------------------------------------------------------------------------
 
-function DT:SetRotation(names)
-    dispelRotation = {}
+--- Helper to get config key for a group (group 1 uses base key, group 2 appends "2")
+local function CfgKey(base, gi)
+    if gi == 1 or not gi then return base end
+    return base .. tostring(gi)
+end
+
+--- Resolve which group the local player is in
+local function ResolveMyGroup()
+    local playerName = StripRealm(UnitName("player") or "")
+    for gi = 1, MAX_GROUPS do
+        for _, entry in ipairs(groups[gi].rotation) do
+            if entry.name == playerName then
+                myGroupIdx = gi
+                return
+            end
+        end
+    end
+    myGroupIdx = nil
+end
+
+function DT:SetRotation(names, groupIdx)
+    groupIdx = groupIdx or 1
+    local gs = groups[groupIdx]
+    gs.rotation = {}
+
     if type(names) == "string" then
-        -- Parse comma-separated: "Hexastyle,Soandso,Thirdperson"
         for name in names:gmatch("[^,]+") do
-            name = StripRealm(name:match("^%s*(.-)%s*$")) -- trim + strip realm
-            table.insert(dispelRotation, { name = name, class = nil })
+            name = StripRealm(name:match("^%s*(.-)%s*$"))
+            table.insert(gs.rotation, { name = name, class = nil })
         end
     elseif type(names) == "table" then
         for _, entry in ipairs(names) do
             if type(entry) == "string" then
-                table.insert(dispelRotation, { name = entry, class = nil })
+                table.insert(gs.rotation, { name = entry, class = nil })
             elseif type(entry) == "table" then
-                table.insert(dispelRotation, entry)
+                table.insert(gs.rotation, entry)
             end
         end
     end
 
-    -- Try to resolve class for each member
+    -- Keep backward-compat alias for group 1
+    if groupIdx == 1 then dispelRotation = gs.rotation end
+
     DT:RebuildGroupMapping()
 
-    currentIdx = 1
-    wipe(dispelCDState)
+    gs.currentIdx = 1
+    wipe(gs.cdState)
+    if groupIdx == 1 then currentIdx = 1; dispelCDState = gs.cdState end
 
     -- Save to config
     local saveData = {}
-    for _, r in ipairs(dispelRotation) do
+    for _, r in ipairs(gs.rotation) do
         table.insert(saveData, { name = r.name, class = r.class })
     end
-    Config:Set("dispelRotation", saveData)
+    Config:Set(CfgKey("dispelRotation", groupIdx), saveData)
+
+    ResolveMyGroup()
 
     local names_str = {}
-    for _, r in ipairs(dispelRotation) do
+    for _, r in ipairs(gs.rotation) do
         table.insert(names_str, r.name)
     end
-    Log:Log("INFO", "Dispel rotation set: " .. table.concat(names_str, " > "))
-    print("|cFFCC88FF[HexCD]|r Dispel rotation: " .. table.concat(names_str, " > "))
+    local groupLabel = groupIdx > 1 and (" (group " .. groupIdx .. ")") or ""
+    Log:Log("INFO", "Dispel rotation set" .. groupLabel .. ": " .. table.concat(names_str, " > "))
+    print("|cFFCC88FF[HexCD]|r Dispel rotation" .. groupLabel .. ": " .. table.concat(names_str, " > "))
 end
 
 function DT:RebuildGroupMapping()
@@ -307,30 +295,36 @@ function DT:RebuildGroupMapping()
         end
     end
 
-    -- Map rotation entries to unit tokens by name
-    for i, entry in ipairs(dispelRotation) do
-        for unit in pairs(groupUnits) do
-            local ok, unitName = pcall(UnitName, unit)
-            if ok and StripRealm(unitName) == entry.name then
-                rotationUnitMap[i] = unit
-                -- Resolve class if not set
-                if not entry.class then
-                    local _, className = UnitClass(unit)
-                    if className and not issecretvalue(className) then
-                        entry.class = className:sub(1,1):upper() .. className:sub(2):lower()
+    -- Map rotation entries to unit tokens by name (all groups)
+    for gi = 1, MAX_GROUPS do
+        local gs = groups[gi]
+        wipe(gs.unitMap)
+        for i, entry in ipairs(gs.rotation) do
+            for unit in pairs(groupUnits) do
+                local ok, unitName = pcall(UnitName, unit)
+                if ok and StripRealm(unitName) == entry.name then
+                    gs.unitMap[i] = unit
+                    -- Resolve class if not set
+                    if not entry.class then
+                        local _, className = UnitClass(unit)
+                        if className and not issecretvalue(className) then
+                            entry.class = className:sub(1,1):upper() .. className:sub(2):lower()
+                        end
                     end
+                    -- Resolve dispel spell info
+                    if entry.class and DISPEL_SPELLS[entry.class] then
+                        local info = DISPEL_SPELLS[entry.class]
+                        entry.spellID = info.spellID
+                        entry.cd = info.cd
+                        entry.dispelName = info.name
+                    end
+                    break
                 end
-                -- Resolve dispel spell info
-                if entry.class and DISPEL_SPELLS[entry.class] then
-                    local info = DISPEL_SPELLS[entry.class]
-                    entry.spellID = info.spellID
-                    entry.cd = info.cd
-                    entry.dispelName = info.name
-                end
-                break
             end
         end
     end
+    -- Keep backward-compat alias
+    rotationUnitMap = groups[1].unitMap
 end
 
 ------------------------------------------------------------------------
@@ -340,9 +334,11 @@ end
 local function IsDispellableAura(aura)
     if not aura then return false end
     if not aura.isHarmful then return false end
-    -- Guard against secret values
-    if issecretvalue and issecretvalue(aura.dispelName) then return false end
-    return aura.dispelName ~= nil
+    -- In Midnight, dispelName may be a secret value — that's OK, it means
+    -- the debuff IS dispellable (Blizzard only secrets the value, not its existence).
+    -- A nil dispelName means not dispellable. A non-nil (even secret) means dispellable.
+    if aura.dispelName == nil then return false end
+    return true
 end
 
 local function ScanUnitAuras(unit)
@@ -363,9 +359,13 @@ local function ScanUnitAuras(unit)
         if not aura then break end
 
         if IsDispellableAura(aura) then
+            local auraName = "Debuff"
+            pcall(function() if not issecretvalue(aura.name) then auraName = aura.name end end)
+            local dispelType = "Magic"
+            pcall(function() if not issecretvalue(aura.dispelName) then dispelType = aura.dispelName end end)
             unitDebuffs[aura.auraInstanceID] = {
-                name = (not issecretvalue(aura.name)) and aura.name or "Debuff",
-                dispelType = aura.dispelName or "Unknown",
+                name = auraName,
+                dispelType = dispelType,
                 expirationTime = aura.expirationTime or 0,
                 duration = aura.duration or 0,
             }
@@ -441,128 +441,99 @@ end
 ------------------------------------------------------------------------
 
 function DT:UpdateDisplay()
-    if visibilityState == "HIDDEN" then return end
-    if #dispelRotation == 0 then return end
-
     local now = GetTime()
     totalDebuffCount = CountTotalDebuffs()
     local barWidth = Config:Get("dispelBarWidth") or 200
     local barHeight = Config:Get("dispelBarHeight") or 20
 
-    -- Active dispeller is locked after each dispel event (lowest CD wins)
-    local activeIdx = currentIdx
+    -- Determine which group shows debuff entries (player's group, or group 1)
+    local debuffGroupIdx = myGroupIdx or 1
 
-    -- Update header: compact title with debuff count
-    local nextName = (activeIdx and dispelRotation[activeIdx]) and dispelRotation[activeIdx].name or "?"
-    if totalDebuffCount > 0 then
-        headerText:SetText("|cFFCC88FFDISPEL|r  |cFFFFCC00" .. nextName .. "'s turn|r  |cFFFF8800[" .. totalDebuffCount .. "]|r")
-    else
-        headerText:SetText("|cFFCC88FFDISPEL|r  |cFFFFCC00" .. nextName .. "'s turn|r")
-    end
+    for gi = 1, MAX_GROUPS do
+        local gs = groups[gi]
+        if not gs.anchorFrame then break end
 
-    -- Layout: header (20px) + gap (4px) + bars + gap (4px) + debuff entries + padding (4px)
-    local HEADER_HEIGHT = 20
-    local GAP = 4
-    local BAR_SPACING = barHeight + 4
-    local ENTRY_HEIGHT = 18
-    local yPos = -(HEADER_HEIGHT + GAP)
-    for i = 1, DISPELLER_BAR_POOL_SIZE do
-        local bar = dispellerBars[i]
-        local entry = dispelRotation[i]
+        if gs.visibilityState == "HIDDEN" or #gs.rotation == 0 then
+            if gs.anchorFrame then gs.anchorFrame:Hide() end
+            for _, bar in ipairs(gs.bars) do bar:Hide(); bar._active = false end
+            for _, entry in ipairs(gs.debuffEntries) do entry:Hide(); entry._active = false end
+        else
+            gs.anchorFrame:Show()
 
-        if entry then
-            local ready, remaining = IsDispellerReady(i)
-            local unit = rotationUnitMap[i]
-            local isDead = unit and UnitExists(unit) and UnitIsDeadOrGhost(unit)
-
-            if isDead then
-                bar:Hide()
-                bar._active = false
+            local activeIdx = gs.currentIdx
+            local nextName = (activeIdx and gs.rotation[activeIdx]) and gs.rotation[activeIdx].name or "?"
+            local groupTag = gi > 1 and (" G" .. gi) or ""
+            if totalDebuffCount > 0 and gi == debuffGroupIdx then
+                gs.headerText:SetText("|cFFCC88FFDISPEL" .. groupTag .. "|r  |cFFFFCC00" .. nextName .. "'s turn|r  |cFFFF8800[" .. totalDebuffCount .. "]|r")
             else
-                bar._active = true
-                bar:ClearAllPoints()
-                bar:SetPoint("TOPLEFT", anchorFrame, "TOPLEFT", 4, yPos)
-                bar:SetSize(barWidth - 8, barHeight)
-                bar:Show()
-                yPos = yPos - BAR_SPACING
+                gs.headerText:SetText("|cFFCC88FFDISPEL" .. groupTag .. "|r  |cFFFFCC00" .. nextName .. "'s turn|r")
+            end
 
-                -- Number + name
-                local dispelSpellName = entry.dispelName or (entry.class and DISPEL_SPELLS[entry.class] and DISPEL_SPELLS[entry.class].name) or "Dispel"
-                bar.nameText:SetText(string.format("|cFFFFFFFF%d|r  %s |cFF888888(%s)|r", i, entry.name or "?", dispelSpellName))
+            local HEADER_HEIGHT = 20
+            local GAP = 4
+            local BAR_SPACING = barHeight + 4
+            local ENTRY_HEIGHT = 18
+            local yPos = -(HEADER_HEIGHT + GAP)
 
-                -- Ready/CD text
-                if ready then
-                    bar.cdText:SetText("|cFF00FF00OK|r")
-                    bar:SetStatusBarColor(0.15, 0.5, 0.15)
-                    bar:SetValue(1)
-                else
-                    bar.cdText:SetText(string.format("|cFFFF4444%.0fs|r", remaining))
-                    bar:SetStatusBarColor(0.5, 0.1, 0.1)
-                    bar:SetValue(remaining / (entry.cd or 8))
-                end
+            for i = 1, DISPELLER_BAR_POOL_SIZE do
+                local bar = gs.bars[i]
+                local entry = gs.rotation[i]
 
-                -- Gold border for active dispeller (don't override CD color)
-                if i == activeIdx then
-                    bar.goldBorder:Show()
-                    if ready then
-                        bar:SetStatusBarColor(0.2, 0.7, 0.2)
+                if entry then
+                    local ready = true
+                    local remaining = 0
+                    local state = gs.cdState[i]
+                    if state then
+                        remaining = math.max(0, state.readyTime - now)
+                        ready = remaining <= 0
+                    end
+                    local unit = gs.unitMap[i]
+                    local isDead = unit and UnitExists(unit) and UnitIsDeadOrGhost(unit)
+
+                    if isDead then
+                        bar:Hide()
+                        bar._active = false
+                    else
+                        bar._active = true
+                        bar:ClearAllPoints()
+                        bar:SetPoint("TOPLEFT", gs.anchorFrame, "TOPLEFT", 4, yPos)
+                        bar:SetSize(barWidth - 8, barHeight)
+                        bar:Show()
+                        yPos = yPos - BAR_SPACING
+
+                        local dispelSpellName = entry.dispelName or (entry.class and DISPEL_SPELLS[entry.class] and DISPEL_SPELLS[entry.class].name) or "Dispel"
+                        bar.nameText:SetText(string.format("|cFFFFFFFF%d|r  %s |cFF888888(%s)|r", i, entry.name or "?", dispelSpellName))
+
+                        if ready then
+                            bar.cdText:SetText("|cFF00FF00OK|r")
+                            bar:SetStatusBarColor(0.15, 0.5, 0.15)
+                            bar:SetValue(1)
+                        else
+                            bar.cdText:SetText(string.format("|cFFFF4444%.0fs|r", remaining))
+                            bar:SetStatusBarColor(0.5, 0.1, 0.1)
+                            bar:SetValue(remaining / (entry.cd or 8))
+                        end
+
+                        if i == activeIdx then
+                            bar.goldBorder:Show()
+                            if ready then bar:SetStatusBarColor(0.2, 0.7, 0.2) end
+                        else
+                            bar.goldBorder:Hide()
+                        end
                     end
                 else
-                    bar.goldBorder:Hide()
+                    bar:Hide()
+                    bar._active = false
                 end
             end
-        else
-            bar:Hide()
-            bar._active = false
+
+            -- Hide debuff entries (rotation bars are sufficient)
+            for _, de in ipairs(gs.debuffEntries) do de:Hide(); de._active = false end
+
+            local totalHeight = math.abs(yPos) + GAP
+            gs.anchorFrame:SetSize(barWidth, totalHeight)
         end
     end
-
-    -- Update debuff entries (positioned below bars)
-    local entryIdx = 0
-    yPos = yPos - GAP
-
-    for unit, unitDebuffs in pairs(activeDebuffs) do
-        for auraInstanceID, debuff in pairs(unitDebuffs) do
-            entryIdx = entryIdx + 1
-            if entryIdx > DEBUFF_ENTRY_POOL_SIZE then break end
-
-            local entry = debuffEntries[entryIdx]
-            entry._active = true
-            entry:ClearAllPoints()
-            entry:SetPoint("TOPLEFT", anchorFrame, "TOPLEFT", 4, yPos)
-            entry:SetSize(barWidth - 8, 16)
-            entry:Show()
-            yPos = yPos - ENTRY_HEIGHT
-
-            local unitName = "?"
-            local ok, name = pcall(UnitName, unit)
-            if ok and name and not issecretvalue(name) then
-                unitName = name
-            end
-
-            local remaining = debuff.expirationTime > 0 and (debuff.expirationTime - now) or 0
-            local timeStr = remaining > 0 and string.format("(%.0fs)", remaining) or ""
-            local typeColor = debuff.dispelType == "Magic" and "FF3399FF"
-                or debuff.dispelType == "Curse" and "FF9933FF"
-                or debuff.dispelType == "Disease" and "FFCC9900"
-                or debuff.dispelType == "Poison" and "FF33CC33"
-                or "FFAAAAAA"
-
-            entry.text:SetText(string.format("  |cFFFFCC00*|r %s - |c%s%s|r %s",
-                unitName, typeColor, debuff.name, timeStr))
-        end
-        if entryIdx >= DEBUFF_ENTRY_POOL_SIZE then break end
-    end
-
-    -- Hide unused entries
-    for i = entryIdx + 1, DEBUFF_ENTRY_POOL_SIZE do
-        debuffEntries[i]:Hide()
-        debuffEntries[i]._active = false
-    end
-
-    -- Resize anchor frame to fit all content
-    local totalHeight = math.abs(yPos) + GAP
-    anchorFrame:SetSize(barWidth, totalHeight)
 end
 
 ------------------------------------------------------------------------
@@ -573,29 +544,47 @@ local function TransitionTo(newState)
     if newState == visibilityState then return end
     local old = visibilityState
     visibilityState = newState
+    for gi = 1, MAX_GROUPS do
+        groups[gi].visibilityState = newState
+    end
 
     if newState == "HIDDEN" then
-        anchorFrame:Hide()
-        for _, bar in ipairs(dispellerBars) do bar:Hide(); bar._active = false end
-        for _, entry in ipairs(debuffEntries) do entry:Hide(); entry._active = false end
-        onUpdateFrame:Hide()
+        for gi = 1, MAX_GROUPS do
+            local gs = groups[gi]
+            if gs.anchorFrame then gs.anchorFrame:Hide() end
+            for _, bar in ipairs(gs.bars) do bar:Hide(); bar._active = false end
+            for _, entry in ipairs(gs.debuffEntries) do entry:Hide(); entry._active = false end
+        end
+        if onUpdateFrame then onUpdateFrame:Hide() end
 
     elseif newState == "ACTIVE" then
         if inactiveTimer then inactiveTimer:Cancel(); inactiveTimer = nil end
-        anchorFrame:Show()
-        anchorFrame:SetAlpha(1.0)
-        onUpdateFrame:Show()
+        for gi = 1, MAX_GROUPS do
+            local gs = groups[gi]
+            if gs.anchorFrame and #gs.rotation > 0 then
+                gs.anchorFrame:Show()
+                gs.anchorFrame:SetAlpha(1.0)
+            end
+        end
+        if onUpdateFrame then onUpdateFrame:Show() end
         DT:UpdateDisplay()
         DT:CheckAlert()
 
     elseif newState == "INACTIVE" then
-        anchorFrame:SetAlpha(0.4)
-        headerText:SetText("|cFFCC88FFDISPEL|r  |cFF00FF00All clear|r")
-        -- Hide bars and debuff entries — just show the header
-        for _, bar in ipairs(dispellerBars) do bar:Hide(); bar._active = false end
-        for _, entry in ipairs(debuffEntries) do entry:Hide(); entry._active = false end
-        onUpdateFrame:Hide()
-        anchorFrame:SetSize(Config:Get("dispelBarWidth") or 200, 24)
+        for gi = 1, MAX_GROUPS do
+            local gs = groups[gi]
+            if gs.anchorFrame then
+                gs.anchorFrame:SetAlpha(0.4)
+                if gs.headerText then
+                    local groupTag = gi > 1 and (" G" .. gi) or ""
+                    gs.headerText:SetText("|cFFCC88FFDISPEL" .. groupTag .. "|r  |cFF00FF00All clear|r")
+                end
+                for _, bar in ipairs(gs.bars) do bar:Hide(); bar._active = false end
+                for _, entry in ipairs(gs.debuffEntries) do entry:Hide(); entry._active = false end
+                gs.anchorFrame:SetSize(Config:Get("dispelBarWidth") or 200, 24)
+            end
+        end
+        if onUpdateFrame then onUpdateFrame:Hide() end
         inactiveTimer = C_Timer.NewTimer(INACTIVE_FADE_SEC, function()
             TransitionTo("HIDDEN")
         end)
@@ -606,13 +595,8 @@ end
 
 local function UpdateVisibility()
     totalDebuffCount = CountTotalDebuffs()
-
-    if totalDebuffCount > 0 then
-        TransitionTo("ACTIVE")
-    elseif visibilityState == "ACTIVE" then
-        TransitionTo("INACTIVE")
-    end
-    -- INACTIVE → HIDDEN handled by timer
+    -- Visibility is now combat-driven (PLAYER_REGEN_DISABLED/ENABLED).
+    -- This function just updates the debuff count for display purposes.
 end
 
 ------------------------------------------------------------------------
@@ -621,7 +605,7 @@ end
 
 function DT:CheckAlert()
     if not Config:Get("dispelAlertEnabled") then return end
-    if totalDebuffCount == 0 then return end
+    if visibilityState ~= "ACTIVE" then return end
     if #dispelRotation == 0 then return end
 
     -- Am I the next dispeller? (locked after each dispel event)
@@ -633,13 +617,20 @@ function DT:CheckAlert()
     local playerName = UnitName("player")
     if entry.name ~= playerName then return end
 
+    -- Only alert if CD is ready
+    local ready, remaining = IsDispellerReady(activeIdx)
+    if not ready then
+        Log:Log("DEBUG", string.format("DispelTracker: alert skipped — CD not ready (%.1fs remaining)", remaining))
+        return
+    end
+
     -- Debounce
     local now = GetTime()
     if now - lastAlertTime < ALERT_DEBOUNCE_SEC then return end
     lastAlertTime = now
 
-    -- Play sound (built-in WoW sound, no external dependency)
-    PlaySound(SOUNDKIT.RAID_WARNING, "Master")
+    -- Play multiple sounds to ensure audibility
+    PlaySound(SOUNDKIT.UI_RAID_BOSS_WHISPER, "Master")
     Log:Log("INFO", "DispelTracker: ALERT — your turn to dispel!")
 end
 
@@ -654,21 +645,34 @@ local function GetAddonChannel()
     return nil
 end
 
-local function BroadcastDispelCast(casterName, spellID)
+local function BroadcastDispelCast(casterName, spellID, groupIdx)
     if not commsRegistered then return end
+    if C_ChatInfo.InChatMessagingLockdown and C_ChatInfo.InChatMessagingLockdown() then return end
+
     local channel = GetAddonChannel()
     if not channel then return end
-    local msg = "DISPEL:" .. casterName .. ":" .. spellID
-    local ok, err = pcall(C_ChatInfo.SendAddonMessage, ADDON_MSG_PREFIX, msg, channel)
-    if ok then
-        Log:Log("DEBUG", "DispelTracker: broadcast dispel from " .. casterName)
-    else
-        Log:Log("DEBUG", "DispelTracker: broadcast failed: " .. tostring(err))
+    local tag = "DISPEL" .. (groupIdx or 1)
+    local msg = tag .. ":" .. casterName .. ":" .. spellID
+    local ok, ret = pcall(C_ChatInfo.SendAddonMessage, ADDON_MSG_PREFIX, msg, channel)
+    if ok and ret ~= 0 then
+        Log:Log("DEBUG", "DispelTracker: broadcast dispel from " .. casterName .. " (group " .. (groupIdx or 1) .. ")")
+        return
+    end
+
+    -- Fallback: whisper each member individually
+    for i = 1, GetNumGroupMembers() do
+        local unit = (IsInRaid() and "raid" or "party") .. i
+        if UnitExists(unit) then
+            local name, realm = UnitName(unit)
+            local target = realm and realm ~= "" and (name .. "-" .. realm) or name
+            pcall(C_ChatInfo.SendAddonMessage, ADDON_MSG_PREFIX, msg, "WHISPER", target)
+        end
     end
 end
 
 --- Broadcast the current dispel rotation to group members running HexCD
-function DT:BroadcastRotation()
+function DT:BroadcastRotation(groupIdx)
+    groupIdx = groupIdx or 1
     if not commsRegistered then
         print("|cFFFF0000[HexCD]|r Comms not registered — are you in a group?")
         return
@@ -678,30 +682,35 @@ function DT:BroadcastRotation()
         print("|cFFFF0000[HexCD]|r Not in a group — cannot broadcast.")
         return
     end
+    local gs = groups[groupIdx]
     local names = {}
-    for _, r in ipairs(dispelRotation) do
+    for _, r in ipairs(gs.rotation) do
         table.insert(names, r.name)
     end
-    local msg = "ROTATION:" .. table.concat(names, ",")
+    local tag = "ROTATION" .. groupIdx
+    local msg = tag .. ":" .. table.concat(names, ",")
     local ok, err = pcall(C_ChatInfo.SendAddonMessage, ADDON_MSG_PREFIX, msg, channel)
     if ok then
-        print("|cFFCC88FF[HexCD]|r Dispel rotation broadcast to group.")
-        Log:Log("INFO", "DispelTracker: broadcast rotation: " .. table.concat(names, " > "))
+        local groupLabel = groupIdx > 1 and (" (group " .. groupIdx .. ")") or ""
+        print("|cFFCC88FF[HexCD]|r Dispel rotation" .. groupLabel .. " broadcast to group.")
+        Log:Log("INFO", "DispelTracker: broadcast rotation" .. groupLabel .. ": " .. table.concat(names, " > "))
     else
         print("|cFFFF0000[HexCD]|r Broadcast failed: " .. tostring(err))
     end
 end
 
-local function HandleDispelByName(casterName, spellID)
+local function HandleDispelByName(casterName, spellID, groupIdx)
+    groupIdx = groupIdx or 1
+    local gs = groups[groupIdx]
     casterName = StripRealm(casterName)
     local now = GetTime()
-    Log:Log("INFO", string.format("DispelTracker: %s used dispel (spell %s) at %.2f", casterName, tostring(spellID), now))
+    Log:Log("INFO", string.format("DispelTracker: %s used dispel (spell %s) group %d at %.2f", casterName, tostring(spellID), groupIdx, now))
 
     -- Record CD for the caster regardless of whose turn it is
-    for i, entry in ipairs(dispelRotation) do
+    for i, entry in ipairs(gs.rotation) do
         if entry.name == casterName then
             local cd = entry.cd or 8
-            dispelCDState[i] = {
+            gs.cdState[i] = {
                 lastTime = now,
                 readyTime = now + cd,
             }
@@ -710,24 +719,22 @@ local function HandleDispelByName(casterName, spellID)
         end
     end
 
-    -- Debug: dump CD states (only players with active CDs)
-    for i, entry in ipairs(dispelRotation) do
-        local s = dispelCDState[i]
-        if s then
-            local rem = s.readyTime - now
-            Log:Log("DEBUG", string.format("  CDState[%d] %s: ready=%.2f rem=%.1fs %s", i, entry.name, s.readyTime, rem, rem > 0 and "ON CD" or "READY"))
-        end
+    -- Recompute next: whoever has the lowest CD (soonest ready)
+    local prevIdx = gs.currentIdx
+    gs.currentIdx = GetLowestCDIdx()
+    if gs.currentIdx ~= prevIdx then
+        gs.lastAlertTime = 0
     end
+    -- Keep backward-compat alias for group 1
+    if groupIdx == 1 then
+        currentIdx = gs.currentIdx
+        dispelCDState = gs.cdState
+    end
+    Log:Log("DEBUG", string.format("Dispel next locked to #%d (%s) group %d",
+        gs.currentIdx, gs.rotation[gs.currentIdx] and gs.rotation[gs.currentIdx].name or "?", groupIdx))
 
-    -- Recompute next: whoever has the lowest CD (soonest ready), locked until next dispel
-    local prevIdx = currentIdx
-    currentIdx = GetLowestCDIdx()
-    -- Reset alert debounce when it becomes a new player's turn
-    if currentIdx ~= prevIdx then
-        lastAlertTime = 0
-    end
-    Log:Log("DEBUG", string.format("Dispel next locked to #%d (%s)",
-        currentIdx, dispelRotation[currentIdx] and dispelRotation[currentIdx].name or "?"))
+    -- Check if it's now the local player's turn
+    DT:CheckAlert()
 end
 
 local function HandleAddonMessage(prefix, message, _, sender)
@@ -739,24 +746,26 @@ local function HandleAddonMessage(prefix, message, _, sender)
     local playerName = UnitName("player")
     if senderShort == playerName then return end
 
-    -- Handle "ROTATION:Name1,Name2,Name3"
-    local rotationNames = message:match("^ROTATION:(.+)$")
+    -- Handle "ROTATION1:Name1,Name2" or "ROTATION2:Name1,Name2" or legacy "ROTATION:Name1,Name2"
+    local rotGi, rotationNames = message:match("^ROTATION(%d?):(.+)$")
     if rotationNames then
-        Log:Log("INFO", "DispelTracker: received rotation from " .. senderShort .. ": " .. rotationNames)
+        local gi = tonumber(rotGi) or 1
+        Log:Log("INFO", string.format("DispelTracker: received rotation group %d from %s: %s", gi, senderShort, rotationNames))
         Config:Set("dispelEnabled", true)
-        DT:SetRotation(rotationNames)
-        print(string.format("|cFFCC88FF[HexCD]|r Dispel rotation received from %s: %s", senderShort, rotationNames))
+        DT:SetRotation(rotationNames, gi)
+        local groupLabel = gi > 1 and (" (group " .. gi .. ")") or ""
+        print(string.format("|cFFCC88FF[HexCD]|r Dispel rotation%s received from %s: %s", groupLabel, senderShort, rotationNames))
         return
     end
 
-    -- Parse "DISPEL:PlayerName:spellID"
-    local msgType, casterName, spellIDStr = message:match("^(%w+):(.+):(%d+)$")
-    if msgType ~= "DISPEL" then return end
-
-    local spellID = tonumber(spellIDStr)
-    if not DISPEL_SPELL_IDS[spellID] then return end
-
-    HandleDispelByName(casterName, spellID)
+    -- Parse "DISPEL1:Name:spellID" or "DISPEL2:Name:spellID" or legacy "DISPEL:Name:spellID"
+    local dispGi, casterName, spellIDStr = message:match("^DISPEL(%d?):(.+):(%d+)$")
+    if casterName and spellIDStr then
+        local gi = tonumber(dispGi) or 1
+        local spellID = tonumber(spellIDStr)
+        if not DISPEL_SPELL_IDS[spellID] then return end
+        HandleDispelByName(casterName, spellID, gi)
+    end
 end
 
 ------------------------------------------------------------------------
@@ -767,6 +776,8 @@ local eventFrame = CreateFrame("Frame", "HexCDDispelTrackerFrame")
 
 eventFrame:RegisterEvent("UNIT_AURA")
 eventFrame:RegisterEvent("UNIT_SPELLCAST_SUCCEEDED")
+eventFrame:RegisterEvent("PLAYER_REGEN_DISABLED")
+eventFrame:RegisterEvent("PLAYER_REGEN_ENABLED")
 eventFrame:RegisterEvent("GROUP_ROSTER_UPDATE")
 eventFrame:RegisterEvent("CHAT_MSG_ADDON")
 
@@ -795,12 +806,29 @@ eventFrame:SetScript("OnEvent", function(self, event, ...)
         -- arrive via CHAT_MSG_ADDON from their HexCD instance.
         if unit == "player" and DISPEL_SPELL_IDS[spellID] then
             local playerName = UnitName("player")
-            HandleDispelByName(playerName, spellID)
-            BroadcastDispelCast(playerName, spellID)
+            ResolveMyGroup()
+            local gi = myGroupIdx or 1
+            HandleDispelByName(playerName, spellID, gi)
+            BroadcastDispelCast(playerName, spellID, gi)
         end
+
+    elseif event == "PLAYER_REGEN_DISABLED" then
+        -- Entering combat — show tracker
+        local hasRotation = false
+        for gi = 1, MAX_GROUPS do
+            if #groups[gi].rotation > 0 then hasRotation = true; break end
+        end
+        if hasRotation then
+            TransitionTo("ACTIVE")
+        end
+
+    elseif event == "PLAYER_REGEN_ENABLED" then
+        -- Leaving combat — hide tracker
+        TransitionTo("HIDDEN")
 
     elseif event == "GROUP_ROSTER_UPDATE" then
         DT:RebuildGroupMapping()
+        DT:AutoEnroll()
     end
 end)
 
@@ -808,12 +836,64 @@ end)
 -- Public API
 ------------------------------------------------------------------------
 
-function DT:GetRotationNames()
+--- Auto-enroll dispellers based on group composition.
+--- Only sets rotation if no manual rotation exists for group 1.
+--- Party: all healer-spec dispellers. Raid: all healers.
+function DT:AutoEnroll()
+    if not IsInGroup() then return end
+
+    local comp = Util.ScanGroupComposition()
+    if #comp.dispellers == 0 then return end
+
+    -- Build set of current group members
+    local groupMemberSet = {}
+    for _, n in ipairs(comp.dispellers) do groupMemberSet[n] = true end
+    for _, n in ipairs(comp.kickers or {}) do groupMemberSet[n] = true end
+    -- Also add all names from the scan
+    for _, n in ipairs(comp.healers or {}) do groupMemberSet[n] = true end
+
+    -- Always clean up stale group 2 (old party/test data)
+    local g2names = self:GetRotationNames(2)
+    for _, n in ipairs(g2names) do
+        if not groupMemberSet[n] then
+            groups[2].rotation = {}
+            groups[2].currentIdx = 1
+            wipe(groups[2].cdState)
+            Config:Set("dispelRotation2", {})
+            Log:Log("DEBUG", "DispelTracker: cleared stale group 2")
+            break
+        end
+    end
+
+    -- Check if group 1 rotation is stale
+    local currentNames = self:GetRotationNames(1)
+    local stale = (#currentNames == 0)
+    if not stale then
+        for _, n in ipairs(currentNames) do
+            if not groupMemberSet[n] then stale = true; break end
+        end
+    end
+
+    if stale then
+
+        DT:SetRotation(comp.dispellers, 1)
+        Log:Log("INFO", "DispelTracker: auto-enrolled " .. #comp.dispellers .. " dispellers")
+    end
+end
+
+function DT:GetRotationNames(groupIdx)
+    groupIdx = groupIdx or 1
+    local gs = groups[groupIdx]
     local names = {}
-    for _, r in ipairs(dispelRotation) do
+    for _, r in ipairs(gs.rotation) do
         table.insert(names, r.name)
     end
     return names
+end
+
+function DT:GetMyGroup()
+    ResolveMyGroup()
+    return myGroupIdx
 end
 
 function DT:Reset()
@@ -825,22 +905,22 @@ function DT:Reset()
 end
 
 function DT:Unlock()
-    if anchorFrame then
-        anchorFrame:EnableMouse(true)
-        anchorFrame:Show()
-        anchorFrame:SetAlpha(1.0)
-        print("|cFFCC88FF[HexCD]|r Dispel tracker unlocked — drag to reposition.")
+    for gi = 1, MAX_GROUPS do
+        local af = groups[gi].anchorFrame
+        if af then af:EnableMouse(true); af:Show(); af:SetAlpha(1.0) end
     end
+    print("|cFFCC88FF[HexCD]|r Dispel tracker unlocked — drag to reposition.")
 end
 
 function DT:Lock()
-    if anchorFrame then
-        anchorFrame:EnableMouse(false)
-        if visibilityState == "HIDDEN" then
-            anchorFrame:Hide()
+    for gi = 1, MAX_GROUPS do
+        local af = groups[gi].anchorFrame
+        if af then
+            af:EnableMouse(false)
+            if visibilityState == "HIDDEN" then af:Hide() end
         end
-        print("|cFFCC88FF[HexCD]|r Dispel tracker locked.")
     end
+    print("|cFFCC88FF[HexCD]|r Dispel tracker locked.")
 end
 
 function DT:IsUnlocked()
@@ -893,20 +973,25 @@ end
 
 --- Test helper: simulate a specific player's dispel cast
 function DT:SimulateCastFrom(name)
-    if #dispelRotation == 0 then return end
     local playerName = UnitName("player")
-    -- Find the entry for this name to get their spellID
-    local spellID = 88423 -- fallback
-    for _, entry in ipairs(dispelRotation) do
-        if entry.name == name then
-            spellID = entry.spellID or 88423
-            break
+    -- Find which group this player is in and their spellID
+    local spellID = 88423
+    local targetGroup = 1
+    for gi = 1, MAX_GROUPS do
+        for _, entry in ipairs(groups[gi].rotation) do
+            if entry.name == name then
+                spellID = entry.spellID or 88423
+                targetGroup = gi
+                break
+            end
         end
     end
+
     if name == playerName then
-        HandleDispelByName(name, spellID)
+        HandleDispelByName(name, spellID, targetGroup)
     else
-        local fakeMessage = "DISPEL:" .. name .. ":" .. spellID
+        local tag = "DISPEL" .. targetGroup
+        local fakeMessage = tag .. ":" .. name .. ":" .. spellID
         local fakeSender = name .. "-FakeRealm"
         HandleAddonMessage(ADDON_MSG_PREFIX, fakeMessage, "PARTY", fakeSender)
     end
@@ -969,13 +1054,26 @@ function DT:SimulateIncomingComms()
 end
 
 --- Test helper: expose internal state for assertions
---- @return table { bars = dispellerBars, cdState = dispelCDState, currentIdx = number, rotation = dispelRotation }
-function DT:_testGetState()
+--- @param groupIdx number|nil (default 1)
+--- @return table
+function DT:_testGetState(groupIdx)
+    groupIdx = groupIdx or 1
+    local gs = groups[groupIdx]
     return {
-        bars = dispellerBars,
-        cdState = dispelCDState,
-        currentIdx = currentIdx,
-        rotation = dispelRotation,
-        visibilityState = visibilityState,
+        bars = gs.bars,
+        cdState = gs.cdState,
+        currentIdx = gs.currentIdx,
+        rotation = gs.rotation,
+        visibilityState = gs.visibilityState,
     }
+end
+
+--- Test helper: directly handle a dispel cast for a specific group
+function DT:_testHandleDispel(name, spellID, groupIdx)
+    HandleDispelByName(name, spellID, groupIdx or 1)
+end
+
+--- Test helper: inject an addon message
+function DT:_testInjectMessage(msg, sender)
+    HandleAddonMessage(ADDON_MSG_PREFIX, msg, "PARTY", sender or "Test-Realm")
 end

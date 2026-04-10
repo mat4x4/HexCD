@@ -29,6 +29,8 @@ local ADDON_MSG_PREFIX = "HexCD"
 ------------------------------------------------------------------------
 local commsRegistered = false
 local eventFrame = nil
+local lastHelloTime = 0
+local HELLO_DEBOUNCE = 30  -- don't send CDHELLO more than once per 30s
 
 -- Party CD state: partyCD[playerName][spellID] = { readyTime, effectiveCD, castTime }
 -- partyCD[playerName]._spec = "specName"
@@ -83,6 +85,11 @@ local function SendCDHello()
     if not commsRegistered then return end
     local channel = GetAddonChannel()
     if not channel then return end
+
+    -- Debounce: don't spam CDHELLO on rapid GROUP_ROSTER_UPDATE
+    local now = GetTime()
+    if now - lastHelloTime < HELLO_DEBOUNCE then return end
+    lastHelloTime = now
 
     local specName = "Unknown"
     if GetSpecialization and GetSpecializationInfo then
@@ -168,10 +175,15 @@ local function OnAddonMessage(prefix, msg, channel, sender)
     local tag = msg:match("^(%u+):")
     if not tag then return end
 
+    -- Ignore self-echo for CDHELLO (we already set our own state locally)
+    local senderName = StripRealm(sender)
+    local isSelf = (senderName == localPlayerName)
+
     if tag == "CDHELLO" then
         local name, spec = msg:match("^CDHELLO:([^:]+):(.+)$")
         if name then
             name = StripRealm(name)
+            if name == localPlayerName then return end  -- skip self-echo entirely
             partyCD[name] = partyCD[name] or {}
             partyCD[name]._spec = spec
             Log:Log("DEBUG", string.format("CommSync CDHELLO from %s spec=%s", name, spec))
