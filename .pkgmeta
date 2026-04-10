@@ -10,3 +10,6 @@ ignore:
   - .github
   - "*.md"
   - .gitignore
+
+move-folders:
+  HexCD/HexCD: HexCD
