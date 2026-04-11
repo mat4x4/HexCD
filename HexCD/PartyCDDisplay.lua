@@ -136,9 +136,9 @@ local function CreateCDIcon(parent)
     btn.timeText = timeText
 
     local glow = btn:CreateTexture(nil, "OVERLAY")
-    glow:SetPoint("TOPLEFT", -1, 1)
-    glow:SetPoint("BOTTOMRIGHT", 1, -1)
-    glow:SetColorTexture(0.2, 0.8, 0.2, 0.4)
+    glow:SetPoint("TOPLEFT", -2, 2)
+    glow:SetPoint("BOTTOMRIGHT", 2, -2)
+    glow:SetColorTexture(1.0, 0.8, 0.0, 0.5)  -- bright yellow, test mode indicator
     glow:Hide()
     btn.glow = glow
 
@@ -158,7 +158,9 @@ local function UpdateIcon(btn, spellID, state, now)
     else
         btn.icon:SetDesaturated(false)
         btn.icon:SetAlpha(1.0)
-        btn.glow:Show()
+        -- Show obvious glow only in test mode
+        local CS = HexCD.CommSync
+        if CS and CS:IsTestMode() then btn.glow:Show() else btn.glow:Hide() end
         btn.timeText:SetText("")
         btn.cooldown:Clear()
     end
@@ -204,6 +206,13 @@ local function FindUnitFrame(playerName)
             end
         end
     end
+
+    -- Last resort: if this is the local player, use PlayerFrame
+    local ok, localName = pcall(UnitName, "player")
+    if ok and localName and StripRealm(localName) == playerName then
+        if PlayerFrame and PlayerFrame:IsShown() then return PlayerFrame end
+    end
+
     return nil
 end
 
@@ -467,12 +476,40 @@ end
 -- Main update
 ------------------------------------------------------------------------
 
+local pcdDebugOnce = true
 local function UpdateDisplay()
     if not isVisible then return end
+    -- Only show in party (not solo, not raid) unless test mode
     local CS = HexCD.CommSync
     if not CS then return end
+    local inParty = IsInGroup and IsInGroup() and not (IsInRaid and IsInRaid())
+    local testing = CS.IsTestMode and CS:IsTestMode()
+    if not inParty and not testing then
+        for _, bar in pairs(personalBars) do bar.container:Hide() end
+        return
+    end
     local partyCD = CS:GetPartyCD()
     local now = GetTime()
+
+    -- One-time debug dump to diagnose personal CD visibility
+    if pcdDebugOnce then
+        pcdDebugOnce = false
+        local Log = HexCD.DebugLog
+        if Log then
+            local count = 0
+            for pName, pData in pairs(partyCD) do
+                if type(pData) == "table" then
+                    local spellCount = 0
+                    for k, v in pairs(pData) do
+                        if type(k) == "number" then spellCount = spellCount + 1 end
+                    end
+                    Log:Log("DEBUG", string.format("PartyCDDisplay: partyCD['%s'] has %d spells", pName, spellCount))
+                    count = count + 1
+                end
+            end
+            Log:Log("DEBUG", string.format("PartyCDDisplay: %d players in partyCD", count))
+        end
+    end
 
     UpdatePersonalBars(partyCD, now)
     for _, cat in ipairs(FLOATING_CATEGORIES) do

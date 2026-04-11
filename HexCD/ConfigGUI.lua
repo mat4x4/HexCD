@@ -380,7 +380,7 @@ local function PopulateKickTab(scrollChild)
 end
 
 ------------------------------------------------------------------------
--- Party CD Tab
+-- Personal CD Tab
 ------------------------------------------------------------------------
 
 local function PopulatePartyCDTab(scrollChild)
@@ -389,7 +389,7 @@ local function PopulatePartyCDTab(scrollChild)
     local y = 0
 
     -- ── Header + Test ──
-    CreateSectionHeader(scrollChild, "Party CD Tracker", y)
+    CreateSectionHeader(scrollChild, "Personal CD Tracker", y)
 
     -- Test / Clear button
     local testActive = false
@@ -758,14 +758,14 @@ local function CreateMainFrame()
 
     local dispelTabBtn = CreateTab("|cFFCC88FFDispel|r", "dispel", 16)
     local kickTabBtn = CreateTab("|cFF88CCFFKick|r", "kick", 130)
-    local partyCDTabBtn = CreateTab("|cFF88FFCCParty CD|r", "partycd", 244)
+    local partyCDTabBtn = CreateTab("|cFF88FFCCPersonal CD|r", "partycd", 244)
     local settingsTabBtn = CreateTab("|cFFAAAAAASettings|r", "settings", 358)
 
     local tabBtns = { dispelTabBtn, kickTabBtn, partyCDTabBtn, settingsTabBtn }
     local tabColors = {
         dispel = { active = {0.15, 0.05, 0.2, 0.9}, border = {0.8, 0.5, 1.0, 1.0}, label = "|cFFCC88FFDispel|r", dim = "|cFF888888Dispel|r" },
         kick = { active = {0.05, 0.1, 0.2, 0.9}, border = {0.5, 0.8, 1.0, 1.0}, label = "|cFF88CCFFKick|r", dim = "|cFF888888Kick|r" },
-        partycd = { active = {0.05, 0.15, 0.1, 0.9}, border = {0.5, 1.0, 0.8, 1.0}, label = "|cFF88FFCCParty CD|r", dim = "|cFF888888Party CD|r" },
+        partycd = { active = {0.05, 0.15, 0.1, 0.9}, border = {0.5, 1.0, 0.8, 1.0}, label = "|cFF88FFCCPersonal CD|r", dim = "|cFF888888Personal CD|r" },
         settings = { active = {0.1, 0.1, 0.1, 0.9}, border = {0.6, 0.6, 0.6, 1.0}, label = "|cFFAAAAAASettings|r", dim = "|cFF888888Settings|r" },
     }
 

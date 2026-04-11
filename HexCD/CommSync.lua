@@ -35,6 +35,7 @@ local HELLO_DEBOUNCE = 30  -- don't send CDHELLO more than once per 30s
 -- Party CD state: partyCD[playerName][spellID] = { readyTime, effectiveCD, castTime }
 -- partyCD[playerName]._spec = "specName"
 local partyCD = {}
+local isTestMode = false
 
 local localPlayerName = nil
 local localSpec = nil
@@ -373,6 +374,33 @@ function CS:Init()
         end
     end
 
+    -- Pre-populate local player's personal CDs as "ready" so icons show immediately
+    pcall(function()
+        local DB = HexCD.SpellDB
+        if not DB or not DB.GetAllSpells then return end
+        partyCD[localPlayerName] = partyCD[localPlayerName] or {}
+        local playerClass = select(2, UnitClass("player"))
+        if not playerClass or (issecretvalue and issecretvalue(playerClass)) then
+            playerClass = UnitClassBase and UnitClassBase("player")
+        end
+        if not playerClass then return end
+        playerClass = playerClass:upper()
+        local count = 0
+        for spellID, info in pairs(DB:GetAllSpells()) do
+            if info.class == playerClass and info.category == "PERSONAL" then
+                if not partyCD[localPlayerName][spellID] then
+                    partyCD[localPlayerName][spellID] = {
+                        readyTime = 0,
+                        effectiveCD = info.cd,
+                        castTime = 0,
+                    }
+                    count = count + 1
+                end
+            end
+        end
+        Log:Log("DEBUG", string.format("CommSync: pre-populated %d PERSONAL spells for %s (%s)", count, localPlayerName, playerClass))
+    end)
+
     -- Send initial hello if already in a group
     SendCDHello()
 
@@ -430,7 +458,10 @@ function CS:GetTrackedSpells()
 end
 
 --- Inject test CD data for real party members using SpellDB categories.
+function CS:IsTestMode() return isTestMode end
+
 function CS:SimulateParty()
+    isTestMode = true
     local now = GetTime()
     localPlayerName = StripRealm(UnitName("player") or "Unknown")
 
@@ -523,10 +554,15 @@ end
 
 --- Clear simulated data.
 function CS:ClearSimulation()
+    isTestMode = false
+    -- Keep local player's data, clear everyone else
+    local myData = partyCD[localPlayerName]
     for name in pairs(partyCD) do
-        partyCD[name] = nil
+        if name ~= localPlayerName then
+            partyCD[name] = nil
+        end
     end
-    Log:Log("INFO", "CommSync: cleared simulated data")
+    Log:Log("INFO", "CommSync: cleared simulated data (kept local player)")
 end
 
 --- Prune players no longer in the group.

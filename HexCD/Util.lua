@@ -306,12 +306,26 @@ function Util.ScanGroupComposition()
     end
 
     for _, unit in ipairs(units) do
+        -- Skip NPC followers/companions (follower dungeons)
+        local isPlayer = (unit == "player")
+        if not isPlayer then pcall(function() isPlayer = UnitIsPlayer(unit) end) end
+        if isPlayer then
         local ok, name = pcall(UnitName, unit)
         if ok and name and name ~= "" and not (issecretvalue and issecretvalue(name)) then
             local shortName = name:match("^([^-]+)") or name
-            local _, className = UnitClass(unit)
-            if className and not (issecretvalue and issecretvalue(className)) then
-                className = className:upper()
+            local className
+            pcall(function()
+                local _, c = UnitClass(unit)
+                if c and not issecretvalue(c) then className = c:upper() end
+            end)
+            -- Fallback: try UnitClassBase which returns just the token
+            if not className then
+                pcall(function()
+                    local c = UnitClassBase and UnitClassBase(unit)
+                    if c and not issecretvalue(c) then className = c:upper() end
+                end)
+            end
+            if className then
 
                 -- Check role
                 local role = nil
@@ -346,6 +360,7 @@ function Util.ScanGroupComposition()
                 end
             end
         end
+        end -- if isPlayer
     end
 
     return result

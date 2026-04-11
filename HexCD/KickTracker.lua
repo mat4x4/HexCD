@@ -136,7 +136,7 @@ end
 local pendingCasts = {}       -- [unit] = GetTime()
 local pendingInterrupts = {}  -- [nameplateUnit] = GetTime()
 local correlPending = false
-local CORREL_WINDOW = 0.050   -- 50ms match window
+local CORREL_WINDOW = 0.200   -- 200ms match window (50ms was too tight in practice)
 
 local function ProcessCorrelation()
     correlPending = false
@@ -183,14 +183,16 @@ local function ProcessCorrelation()
         if ok and name then
             local shortName = StripRealm(name)
             Log:Log("INFO", string.format("KickCorrel: matched %s (unit=%s, diff=%.3fs)", shortName, bestUnit, bestDiff))
+
+            -- Clear immediately to prevent re-matching on subsequent ProcessCorrelation calls
+            wipe(pendingInterrupts)
+            wipe(pendingCasts)
+
             -- Route through HandleKickByName with dedup (layer 3 = "correlated")
-            -- Note: correlation can't determine WHICH spell was cast (spellID is secret).
-            -- We look up the player's known interrupt spell from their rotation entry or class.
             local found = false
             for gi = 1, MAX_GROUPS do
                 for _, entry in ipairs(groups[gi].rotation) do
                     if entry.name == shortName then
-                        -- Use entry's spellID if known, or look up class default
                         local spellID = entry.spellID
                         if not spellID or spellID == 0 then
                             local classInfo = entry.class and KICK_SPELLS[entry.class]
@@ -204,9 +206,24 @@ local function ProcessCorrelation()
                 if found then break end
             end
             if not found then
-                Log:Log("DEBUG", string.format("KickCorrel: %s kicked but not in any rotation group", shortName))
+                -- Player kicked but not in rotation — auto-add and handle
+                Log:Log("INFO", string.format("KickCorrel: %s kicked (not in rotation) — auto-adding to group 1", shortName))
+                local classInfo = nil
+                pcall(function()
+                    local _, c = UnitClass(bestUnit)
+                    if c and not issecretvalue(c) then
+                        classInfo = KICK_SPELLS[c:sub(1,1):upper() .. c:sub(2):lower()]
+                    end
+                end)
+                local spellID = classInfo and classInfo.spellID or 0
+                local cd = classInfo and classInfo.cd or 15
+                table.insert(groups[1].rotation, { name = shortName, class = nil, spellID = spellID, cd = cd })
+                if #groups[1].rotation == 1 then groups[1].currentIdx = 1 end
+                if 1 == 1 then kickRotation = groups[1].rotation end
+                HandleKickByName(shortName, spellID, 1, "correlated")
             end
         end
+        return  -- Already cleaned up
     else
         Log:Log("DEBUG", "KickCorrel: no cast matched within time window")
     end
@@ -222,8 +239,9 @@ correlFrame:SetScript("OnEvent", function(_, event, unit)
     if not Config:Get("kickEnabled") then return end
 
     if event == "UNIT_SPELLCAST_SUCCEEDED" then
-        -- Skip player (handled by main event frame) and non-party units
+        -- Skip player, pets, and non-party units
         if unit == "player" or unit == "pet" then return end
+        if unit:find("pet") then return end  -- partypet1, raidpet3, etc.
         if not unit:find("^party") and not unit:find("^raid") then return end
         pendingCasts[unit] = GetTime()
         Log:Log("TRACE", string.format("KickCorrel: CAST from %s at %.3f", unit, GetTime()))
