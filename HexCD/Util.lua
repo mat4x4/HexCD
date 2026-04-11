@@ -26,11 +26,13 @@ function Util.IsInRaid()
 end
 
 --- Returns the addon message channel for the current group, or nil if solo.
---- M+ / LFG uses instance groups (category 2) which need "INSTANCE_CHAT".
+--- Pre-formed M+ groups use PARTY even inside the instance.
+--- LFG/matchmaking groups may need INSTANCE_CHAT.
+--- Prefer PARTY first since it works for both normal and pre-formed M+ groups.
 function Util.GetGroupChannel()
     if IsInRaid and IsInRaid() then return "RAID" end
-    if IsInGroup and IsInGroup(2) then return "INSTANCE_CHAT" end
     if IsInGroup and IsInGroup() then return "PARTY" end
+    if IsInGroup and IsInGroup(2) then return "INSTANCE_CHAT" end
     return nil
 end
 
