@@ -188,6 +188,70 @@ local function OnAddonMessage(prefix, msg, channel, sender)
             partyCD[name] = partyCD[name] or {}
             partyCD[name]._spec = spec
             Log:Log("DEBUG", string.format("CommSync CDHELLO from %s spec=%s", name, spec))
+
+            -- Pre-populate their personal CDs as "ready" based on class
+            -- Resolve class from spec name (avoids name-matching issues with special chars)
+            local SPEC_TO_CLASS = {
+                -- DK
+                Blood = "DEATHKNIGHT", Frost = "DEATHKNIGHT", Unholy = "DEATHKNIGHT",
+                -- DH
+                Havoc = "DEMONHUNTER", Vengeance = "DEMONHUNTER",
+                -- Druid
+                Balance = "DRUID", Feral = "DRUID", Guardian = "DRUID", Restoration = "DRUID",
+                -- Evoker
+                Devastation = "EVOKER", Preservation = "EVOKER", Augmentation = "EVOKER",
+                -- Hunter
+                ["Beast Mastery"] = "HUNTER", Marksmanship = "HUNTER", Survival = "HUNTER",
+                -- Mage
+                Arcane = "MAGE", Fire = "MAGE", ["Frost "] = "MAGE",  -- note: "Frost" conflicts with DK
+                -- Monk
+                Brewmaster = "MONK", Mistweaver = "MONK", Windwalker = "MONK",
+                -- Paladin
+                Holy = "PALADIN", Protection = "PALADIN", Retribution = "PALADIN",
+                -- Priest
+                Discipline = "PRIEST", ["Holy "] = "PRIEST", Shadow = "PRIEST",
+                -- Rogue
+                Assassination = "ROGUE", Outlaw = "ROGUE", Subtlety = "ROGUE",
+                -- Shaman
+                Elemental = "SHAMAN", Enhancement = "SHAMAN",
+                -- Warlock
+                Affliction = "WARLOCK", Demonology = "WARLOCK", Destruction = "WARLOCK",
+                -- Warrior
+                Arms = "WARRIOR", Fury = "WARRIOR",
+            }
+            -- Handle ambiguous specs (Frost, Holy, Protection) by also checking UnitClass
+            pcall(function()
+                local DB = HexCD.SpellDB
+                if not DB or not DB.GetAllSpells then return end
+                local theirClass = SPEC_TO_CLASS[spec]
+                -- Fallback: try UnitClass if spec didn't resolve
+                if not theirClass then
+                    for i = 1, 4 do
+                        local unit = "party" .. i
+                        pcall(function()
+                            local uname = UnitName(unit)
+                            if uname and StripRealm(uname) == name then
+                                local c = select(2, UnitClass(unit))
+                                if c and not (issecretvalue and issecretvalue(c)) then theirClass = c:upper() end
+                            end
+                        end)
+                        if theirClass then break end
+                    end
+                end
+                if not theirClass then return end
+                local count = 0
+                for spellID, info in pairs(DB:GetAllSpells()) do
+                    if info.class == theirClass and info.category == "PERSONAL" then
+                        if not partyCD[name][spellID] then
+                            partyCD[name][spellID] = { readyTime = 0, effectiveCD = info.cd, castTime = 0 }
+                            count = count + 1
+                        end
+                    end
+                end
+                if count > 0 then
+                    Log:Log("DEBUG", string.format("CommSync: pre-populated %d PERSONAL spells for %s (%s)", count, name, theirClass))
+                end
+            end)
         end
 
     elseif tag == "CDCAST" then
@@ -301,8 +365,8 @@ local function OnEvent(self, event, ...)
         inEncounter = false
         Log:Log("INFO", "CommSync ENCOUNTER_END")
         encounterName = ""
-        -- Auto-open HexCD debug log after raid encounters
-        if not inMythicPlus then
+        -- Auto-open HexCD debug log after raid encounters (dev only)
+        if not inMythicPlus and Config:Get("autoOpenLog") then
             C_Timer.After(2, function()
                 Log:ShowFrame()
             end)
@@ -325,10 +389,12 @@ local function OnEvent(self, event, ...)
     elseif event == "CHALLENGE_MODE_COMPLETED" then
         inMythicPlus = false
         Log:Log("INFO", "CommSync M+ KEY COMPLETED")
-        C_Timer.After(3, function()
-            Log:ShowFrame()
-            print("|cFF00CCFF[HexCD]|r Debug log auto-opened. Copy with Ctrl+A \226\134\146 Ctrl+C.")
-        end)
+        if Config:Get("autoOpenLog") then
+            C_Timer.After(3, function()
+                Log:ShowFrame()
+                print("|cFF00CCFF[HexCD]|r Debug log auto-opened. Copy with Ctrl+A \226\134\146 Ctrl+C.")
+            end)
+        end
     end
 end
 
