@@ -42,6 +42,13 @@ local DEFAULTS = {
     kickAnchorX2 = -300,
     kickAnchorY2 = -80,
 
+    -- TTS Settings
+    ttsVoiceName = "",    -- empty = auto-detect (Amy → first available)
+    ttsRate = 3,          -- speech rate 1-10
+    ttsVolume = 100,      -- volume 0-100
+    dispelAlertText = "Dispel",
+    kickAlertText = "Kick",
+
     -- Party CD Display
     partyCDAnchorSide = "RIGHT",
     partyCDOfsX = 4,

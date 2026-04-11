@@ -809,6 +809,55 @@ local function CreateMainFrame()
             PopulatePartyCDTab(scrollChild)
         elseif activeTab == "settings" then
             local y = 0
+
+            -- TTS Settings
+            CreateSectionHeader(scrollChild, "TTS (Text-to-Speech)", y)
+            y = y - 25
+
+            -- Voice dropdown
+            local voiceNames = { "" }  -- empty = auto-detect
+            local voices = HexCD.Util and HexCD.Util.GetTTSVoices and HexCD.Util.GetTTSVoices() or {}
+            for _, v in ipairs(voices) do
+                table.insert(voiceNames, v.name)
+            end
+            CreateSettingsDropdown(scrollChild, "TTS Voice (empty = auto)", "ttsVoiceName", voiceNames, y)
+            y = y - 55
+
+            CreateSettingsSlider(scrollChild, "Speech Rate", 1, 10, 1, "ttsRate", y)
+            y = y - 55
+
+            CreateSettingsSlider(scrollChild, "Volume", 0, 100, 5, "ttsVolume", y)
+            y = y - 55
+
+            -- Alert text config
+            CreateSectionHeader(scrollChild, "Alert Text", y)
+            y = y - 25
+
+            local dispelBox = CreateSettingsEditBox(scrollChild, "Dispel alert:", Config:Get("dispelAlertText") or "Dispel", 200, y)
+            y = y - 50
+
+            local kickBox = CreateSettingsEditBox(scrollChild, "Kick alert:", Config:Get("kickAlertText") or "Kick", 200, y)
+            y = y - 50
+
+            local function MakeBtn(label, width, xOff, onClick)
+                local btn = CreateFrame("Button", nil, scrollChild, "UIPanelButtonTemplate")
+                btn:SetSize(width, 24)
+                btn:SetPoint("TOPLEFT", scrollChild, "TOPLEFT", xOff, y)
+                btn:SetText(label)
+                btn:SetScript("OnClick", onClick)
+                return btn
+            end
+
+            MakeBtn("Save & Test", 100, 16, function()
+                Config:Set("dispelAlertText", dispelBox._editBox:GetText())
+                Config:Set("kickAlertText", kickBox._editBox:GetText())
+                if HexCD.Util and HexCD.Util.SpeakTTS then
+                    HexCD.Util.SpeakTTS(dispelBox._editBox:GetText())
+                end
+            end)
+            y = y - 35
+
+            -- Debug
             CreateSectionHeader(scrollChild, "Debug", y)
             y = y - 25
             CreateSettingsDropdown(scrollChild, "Log Level", "logLevel", { "OFF", "ERRORS", "INFO", "DEBUG", "TRACE" }, y)

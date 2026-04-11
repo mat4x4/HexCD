@@ -1,9 +1,47 @@
 ------------------------------------------------------------------------
 -- HexCD: Kick Tracker
 -- Shows an interrupt rotation overlay during combat.
--- Detects own kicks via UNIT_SPELLCAST_SUCCEEDED, others via addon comms.
+-- Supports 2 independent rotation groups for raid use.
 --
 -- States: HIDDEN (out of combat) → ACTIVE (in combat with rotation set)
+--
+-- === 4-Layer Kick Detection Architecture ===
+--
+-- Layer 1: OWN CAST (0ms latency, no addon required)
+--   UNIT_SPELLCAST_SUCCEEDED "player" → spellID is clean for self
+--   → SafeGetKickData(spellID) → HandleKickByName(source="self")
+--   → BroadcastKickCast() to group via SendAddonMessage
+--
+-- Layer 3: CORRELATION (30ms latency, no addon required on other player)
+--   In Midnight 12.0, UNIT_SPELLCAST_SUCCEEDED fires for party members
+--   but spellID is a "secret value" (can't read/compare it).
+--   UNIT_SPELLCAST_INTERRUPTED fires on nameplates when a mob cast is kicked.
+--   We correlate the two by timestamp within a 50ms window:
+--     party1 casts *something* at T=100.003
+--     nameplate3's cast interrupted at T=100.020
+--     diff = 17ms < 50ms window → party1 kicked nameplate3
+--   Works even if the other player doesn't have HexCD!
+--   (Technique from InterruptTracker by josh-the-dev)
+--
+-- Layer 4: ADDON MESSAGE (100-500ms latency, requires HexCD on other player)
+--   Other HexCD clients broadcast KICK1:Name:spellID via SendAddonMessage.
+--   Received via CHAT_MSG_ADDON → HandleKickByName(source="addon")
+--   Serves as backup when correlation fails (no nameplate visible, etc.)
+--
+-- Dedup: All layers route through HandleKickByName() which has a 2-second
+-- dedup window per player. If a kick was already recorded for that player
+-- within 2s, subsequent detections are silently dropped. Typical flow:
+-- Layer 1 (0ms) or Layer 3 (~30ms) records the kick first, then Layer 4
+-- (~300ms) arrives and is deduped.
+--
+-- False positive risk: Layer 3 can't verify the spell was an interrupt
+-- (spellID is secret). If a party member casts a regular spell within 50ms
+-- of a mob cast being interrupted by someone else, it could false-match.
+-- The 50ms window makes this extremely unlikely in practice.
+--
+-- Taint Laundering: SafeGetKickData() uses a StatusBar SetValue trick to
+-- strip Midnight's "secret value" wrapper from spellIDs, allowing direct
+-- lookup in the KICK_SPELL_IDS table even for party member casts.
 ------------------------------------------------------------------------
 HexCD = HexCD or {}
 HexCD.KickTracker = {}
@@ -110,6 +148,11 @@ local function ProcessCorrelation()
         targetUnit = unit
     end
 
+    local castCount = 0
+    for _ in pairs(pendingCasts) do castCount = castCount + 1 end
+
+    Log:Log("DEBUG", string.format("KickCorrel: processing — %d casts, %d interrupts", castCount, interruptCount))
+
     if interruptCount == 0 then
         wipe(pendingCasts)
         return
@@ -117,6 +160,7 @@ local function ProcessCorrelation()
 
     -- Multiple simultaneous interrupts = AoE CC, not a kick
     if interruptCount > 1 then
+        Log:Log("DEBUG", string.format("KickCorrel: %d simultaneous interrupts — AoE CC, skipping", interruptCount))
         wipe(pendingInterrupts)
         wipe(pendingCasts)
         return
@@ -128,6 +172,7 @@ local function ProcessCorrelation()
     local bestUnit, bestDiff = nil, math.huge
     for unit, castTime in pairs(pendingCasts) do
         local diff = math.abs(interruptTime - castTime)
+        Log:Log("DEBUG", string.format("KickCorrel: checking %s diff=%.3fs (window=%.3f)", unit, diff, CORREL_WINDOW))
         if diff <= CORREL_WINDOW and diff < bestDiff then
             bestUnit, bestDiff = unit, diff
         end
@@ -137,16 +182,33 @@ local function ProcessCorrelation()
         local ok, name = pcall(UnitName, bestUnit)
         if ok and name then
             local shortName = StripRealm(name)
+            Log:Log("INFO", string.format("KickCorrel: matched %s (unit=%s, diff=%.3fs)", shortName, bestUnit, bestDiff))
             -- Route through HandleKickByName with dedup (layer 3 = "correlated")
+            -- Note: correlation can't determine WHICH spell was cast (spellID is secret).
+            -- We look up the player's known interrupt spell from their rotation entry or class.
+            local found = false
             for gi = 1, MAX_GROUPS do
                 for _, entry in ipairs(groups[gi].rotation) do
                     if entry.name == shortName then
-                        HandleKickByName(shortName, entry.spellID or 0, gi, "correlated")
+                        -- Use entry's spellID if known, or look up class default
+                        local spellID = entry.spellID
+                        if not spellID or spellID == 0 then
+                            local classInfo = entry.class and KICK_SPELLS[entry.class]
+                            spellID = classInfo and classInfo.spellID or 0
+                        end
+                        HandleKickByName(shortName, spellID, gi, "correlated")
+                        found = true
                         break
                     end
                 end
+                if found then break end
+            end
+            if not found then
+                Log:Log("DEBUG", string.format("KickCorrel: %s kicked but not in any rotation group", shortName))
             end
         end
+    else
+        Log:Log("DEBUG", "KickCorrel: no cast matched within time window")
     end
 
     wipe(pendingInterrupts)
@@ -162,8 +224,9 @@ correlFrame:SetScript("OnEvent", function(_, event, unit)
     if event == "UNIT_SPELLCAST_SUCCEEDED" then
         -- Skip player (handled by main event frame) and non-party units
         if unit == "player" or unit == "pet" then return end
-        if not unit:find("^party") then return end
+        if not unit:find("^party") and not unit:find("^raid") then return end
         pendingCasts[unit] = GetTime()
+        Log:Log("TRACE", string.format("KickCorrel: CAST from %s at %.3f", unit, GetTime()))
         if not correlPending then
             correlPending = true
             C_Timer.After(0.03, ProcessCorrelation)
@@ -173,6 +236,7 @@ correlFrame:SetScript("OnEvent", function(_, event, unit)
         -- Only care about nameplate units (mob cast was interrupted)
         if not unit:find("^nameplate") then return end
         pendingInterrupts[unit] = GetTime()
+        Log:Log("TRACE", string.format("KickCorrel: INTERRUPT on %s at %.3f", unit, GetTime()))
         if not correlPending then
             correlPending = true
             C_Timer.After(0.03, ProcessCorrelation)
@@ -589,7 +653,7 @@ local function TransitionTo(newState)
         end
         if onUpdateFrame then onUpdateFrame:Show() end
         KT:UpdateDisplay()
-        KT:CheckAlert()
+        -- Do NOT CheckAlert on combat entry — only alert on actual kick events
     end
 
     Log:Log("DEBUG", string.format("KickTracker: %s → %s", old, newState))
@@ -622,8 +686,9 @@ function KT:CheckAlert()
     if now - lastAlertTime < ALERT_DEBOUNCE_SEC then return end
     lastAlertTime = now
 
-    PlaySound(SOUNDKIT.UI_RAID_BOSS_WHISPER, "Master")
-    Log:Log("INFO", "KickTracker: ALERT — your turn to kick!")
+    local alertText = Config:Get("kickAlertText") or "Kick"
+    Util.SpeakTTS(alertText)
+    Log:Log("INFO", "KickTracker: ALERT — TTS: " .. alertText)
 end
 
 ------------------------------------------------------------------------
@@ -726,14 +791,31 @@ local function HandleKickByName(casterName, spellID, groupIdx, source)
         end
     end
 
-    local prevIdx = gs.currentIdx
-    gs.currentIdx = GetLowestCDIdx()
-    if gs.currentIdx ~= prevIdx then
-        gs.lastAlertTime = 0
+    -- Advance rotation (shared logic: only if current person cast, 15s inactivity reset)
+    local didAdvance = Util.AdvanceRotation(gs, casterName, GetNextAliveIdx, function(g)
+        if groupIdx == 1 then currentIdx = g.currentIdx; kickCDState = g.cdState end
+    end, "Kick", nil)
+
+    -- Only alert if rotation actually changed to the player
+    if didAdvance then
+        KT:CheckAlert()
     end
-    if groupIdx == 1 then currentIdx = gs.currentIdx; kickCDState = gs.cdState end
-    Log:Log("DEBUG", string.format("Kick next locked to #%d (%s) group %d",
-        gs.currentIdx, gs.rotation[gs.currentIdx] and gs.rotation[gs.currentIdx].name or "?", groupIdx))
+
+    -- Schedule a re-check when the player's CD expires
+    local playerName = StripRealm(UnitName("player") or "")
+    local myEntry = gs.rotation[gs.currentIdx]
+    if myEntry and myEntry.name == playerName then
+        local state = gs.cdState[gs.currentIdx]
+        if state and state.readyTime then
+            local remaining = state.readyTime - GetTime()
+            if remaining > 0 then
+                C_Timer.After(remaining + 0.1, function()
+                    Log:Log("DEBUG", "KickTracker: CD expired timer — re-checking alert")
+                    KT:CheckAlert()
+                end)
+            end
+        end
+    end
 end
 
 local function HandleAddonMessage(prefix, message, _, sender)
@@ -1011,6 +1093,15 @@ function KT:_testGetState(groupIdx)
         currentIdx = gs.currentIdx,
         rotation = gs.rotation,
         visibilityState = gs.visibilityState,
+    }
+end
+
+function KT:_testGetQueueState()
+    local gs = groups[1]
+    return {
+        currentIdx = gs.currentIdx,
+        rotation = gs.rotation,
+        cdState = gs.cdState,
     }
 end
 

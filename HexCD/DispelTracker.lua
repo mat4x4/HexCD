@@ -568,7 +568,7 @@ local function TransitionTo(newState)
         end
         if onUpdateFrame then onUpdateFrame:Show() end
         DT:UpdateDisplay()
-        DT:CheckAlert()
+        -- Do NOT CheckAlert on combat entry — only alert on actual dispel events
 
     elseif newState == "INACTIVE" then
         for gi = 1, MAX_GROUPS do
@@ -630,8 +630,9 @@ function DT:CheckAlert()
     lastAlertTime = now
 
     -- Play multiple sounds to ensure audibility
-    PlaySound(SOUNDKIT.UI_RAID_BOSS_WHISPER, "Master")
-    Log:Log("INFO", "DispelTracker: ALERT — your turn to dispel!")
+    local alertText = Config:Get("dispelAlertText") or "Dispel"
+    Util.SpeakTTS(alertText)
+    Log:Log("INFO", "DispelTracker: ALERT — TTS: " .. alertText)
 end
 
 ------------------------------------------------------------------------
@@ -719,22 +720,31 @@ local function HandleDispelByName(casterName, spellID, groupIdx)
         end
     end
 
-    -- Recompute next: whoever has the lowest CD (soonest ready)
-    local prevIdx = gs.currentIdx
-    gs.currentIdx = GetLowestCDIdx()
-    if gs.currentIdx ~= prevIdx then
-        gs.lastAlertTime = 0
-    end
-    -- Keep backward-compat alias for group 1
-    if groupIdx == 1 then
-        currentIdx = gs.currentIdx
-        dispelCDState = gs.cdState
-    end
-    Log:Log("DEBUG", string.format("Dispel next locked to #%d (%s) group %d",
-        gs.currentIdx, gs.rotation[gs.currentIdx] and gs.rotation[gs.currentIdx].name or "?", groupIdx))
+    -- Advance rotation (shared logic: only if current person cast, 15s inactivity reset)
+    local didAdvance = Util.AdvanceRotation(gs, casterName, GetNextAliveIdx, function(g)
+        if groupIdx == 1 then currentIdx = g.currentIdx; dispelCDState = g.cdState end
+    end, "Dispel", function() DT:CheckAlert() end)
 
-    -- Check if it's now the local player's turn
-    DT:CheckAlert()
+    -- Only re-alert if rotation actually changed (avoid duplicate TTS on out-of-order casts)
+    if didAdvance then
+        DT:CheckAlert()
+    end
+
+    -- Schedule a re-check when the player's CD expires
+    local playerName = StripRealm(UnitName("player") or "")
+    local myEntry = gs.rotation[gs.currentIdx]
+    if myEntry and myEntry.name == playerName then
+        local state = gs.cdState[gs.currentIdx]
+        if state and state.readyTime then
+            local remaining = state.readyTime - GetTime()
+            if remaining > 0 then
+                C_Timer.After(remaining + 0.1, function()
+                    Log:Log("DEBUG", "DispelTracker: CD expired timer — re-checking alert")
+                    DT:CheckAlert()
+                end)
+            end
+        end
+    end
 end
 
 local function HandleAddonMessage(prefix, message, _, sender)
@@ -1065,6 +1075,16 @@ function DT:_testGetState(groupIdx)
         currentIdx = gs.currentIdx,
         rotation = gs.rotation,
         visibilityState = gs.visibilityState,
+    }
+end
+
+--- Test helper: get current rotation state for assertions
+function DT:_testGetQueueState()
+    local gs = groups[1]
+    return {
+        currentIdx = gs.currentIdx,
+        rotation = gs.rotation,
+        cdState = gs.cdState,
     }
 end
 

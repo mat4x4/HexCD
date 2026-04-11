@@ -122,6 +122,152 @@ function Util.DeepCopy(t)
 end
 
 ------------------------------------------------------------------------
+-- TTS Helper (simplified from HexCD_Reminder's TTS.lua)
+------------------------------------------------------------------------
+
+local ttsVoiceID = nil
+local ttsVoiceResolved = false
+local ttsVoiceConfigName = nil  -- tracks config to detect changes
+
+--- Resolve TTS voice by name preference
+local function ResolveTTSVoice()
+    local Config = HexCD.Config
+    local preferredName = Config and Config:Get("ttsVoiceName") or ""
+
+    -- Re-resolve if config changed
+    if ttsVoiceResolved and preferredName == ttsVoiceConfigName then return end
+    ttsVoiceResolved = true
+    ttsVoiceConfigName = preferredName
+    ttsVoiceID = nil
+
+    if not (C_VoiceChat and C_VoiceChat.GetTtsVoices) then return end
+    local voices = C_VoiceChat.GetTtsVoices()
+    if not voices or #voices == 0 then return end
+
+    -- Try user-configured voice first
+    if preferredName and preferredName ~= "" then
+        local lower = preferredName:lower()
+        for _, v in ipairs(voices) do
+            if v.name and v.name:lower():find(lower) then
+                ttsVoiceID = v.voiceID
+                return
+            end
+        end
+    end
+
+    -- Fallback: try Amy, then first available
+    for _, v in ipairs(voices) do
+        if v.name and v.name:lower():find("amy") then
+            ttsVoiceID = v.voiceID
+            return
+        end
+    end
+    ttsVoiceID = voices[1].voiceID
+end
+
+--- Get list of available TTS voices (for GUI dropdown)
+---@return table { {name, voiceID}, ... }
+function Util.GetTTSVoices()
+    local result = {}
+    if C_VoiceChat and C_VoiceChat.GetTtsVoices then
+        local voices = C_VoiceChat.GetTtsVoices()
+        if voices then
+            for _, v in ipairs(voices) do
+                table.insert(result, { name = v.name, voiceID = v.voiceID })
+            end
+        end
+    end
+    return result
+end
+
+--- Speak text via WoW TTS + show raid warning frame text
+---@param text string
+function Util.SpeakTTS(text)
+    if not text or text == "" then return end
+
+    ResolveTTSVoice()
+
+    local Config = HexCD.Config
+    local rate = Config and Config:Get("ttsRate") or 3
+    local volume = Config and Config:Get("ttsVolume") or 100
+
+    -- Speak via C_VoiceChat
+    local Log = HexCD.DebugLog
+    if C_VoiceChat and C_VoiceChat.SpeakText and ttsVoiceID ~= nil then
+        local ok, err = pcall(C_VoiceChat.SpeakText, ttsVoiceID, text, rate, volume, true)
+        if Log then Log:Log("DEBUG", string.format("TTS: voice=%d text='%s' rate=%d vol=%d ok=%s",
+            ttsVoiceID, text, rate, volume, tostring(ok))) end
+    else
+        if Log then Log:Log("DEBUG", string.format("TTS SKIPPED: C_VoiceChat=%s SpeakText=%s voiceID=%s",
+            tostring(C_VoiceChat ~= nil), tostring(C_VoiceChat and C_VoiceChat.SpeakText ~= nil), tostring(ttsVoiceID))) end
+    end
+
+    -- Also show raid warning text (visual fallback)
+    if RaidNotice_AddMessage and RaidWarningFrame then
+        RaidNotice_AddMessage(RaidWarningFrame,
+            "|cFFFF8800>> " .. text .. " <<|r",
+            ChatTypeInfo["RAID_WARNING"])
+    end
+end
+
+------------------------------------------------------------------------
+-- Rotation Advance Logic (shared between Dispel/Kick trackers)
+------------------------------------------------------------------------
+
+--- Advance rotation after a cast. Only advances if caster is the current person.
+--- Starts a 5s inactivity timer to reset to position 1 silently.
+---@param gs table Group state with .rotation, .currentIdx, .cdState, ._resetGeneration
+---@param casterName string Name of the person who cast
+---@param getNextAliveIdx function(startIdx) Returns next alive index
+---@param backwardCompatUpdate function(gs) Optional: update backward-compat aliases
+---@param trackerName string "Dispel" or "Kick" for logging
+--- Returns: didAdvance (boolean) — true if currentIdx changed
+function Util.AdvanceRotation(gs, casterName, getNextAliveIdx, backwardCompatUpdate, trackerName, checkAlertFn)
+    local Log = HexCD.DebugLog
+
+    -- Find caster's index
+    local casterIdx = nil
+    for i, entry in ipairs(gs.rotation) do
+        if entry.name == casterName then casterIdx = i; break end
+    end
+
+    local prevIdx = gs.currentIdx
+    -- Only advance if caster IS the current person
+    if casterIdx == gs.currentIdx then
+        local nextIdx = (gs.currentIdx % #gs.rotation) + 1
+        gs.currentIdx = getNextAliveIdx(nextIdx) or 1
+        if gs.currentIdx ~= casterIdx then
+            gs.lastAlertTime = 0
+        end
+    end
+
+    local didAdvance = (gs.currentIdx ~= prevIdx)
+    if backwardCompatUpdate then backwardCompatUpdate(gs) end
+    if Log then
+        Log:Log("DEBUG", string.format("%s next locked to #%d (%s)",
+            trackerName, gs.currentIdx, gs.rotation[gs.currentIdx] and gs.rotation[gs.currentIdx].name or "?"))
+    end
+
+    -- 5-second inactivity reset
+    gs._resetGeneration = (gs._resetGeneration or 0) + 1
+    local gen = gs._resetGeneration
+    C_Timer.After(15, function()
+        if gs._resetGeneration ~= gen then return end
+        if gs.currentIdx ~= 1 then
+            gs.currentIdx = getNextAliveIdx(1) or 1
+            if backwardCompatUpdate then backwardCompatUpdate(gs) end
+            if Log then
+                Log:Log("DEBUG", string.format("%sTracker: 5s inactivity reset → #%d (%s)",
+                    trackerName, gs.currentIdx, gs.rotation[gs.currentIdx] and gs.rotation[gs.currentIdx].name or "?"))
+            end
+            -- Silent reset — do NOT alert (user requested no TTS on reset)
+        end
+    end)
+
+    return didAdvance
+end
+
+------------------------------------------------------------------------
 -- Group Composition Helpers
 ------------------------------------------------------------------------
 
