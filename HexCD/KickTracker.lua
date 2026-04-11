@@ -188,39 +188,12 @@ local function ProcessCorrelation()
             wipe(pendingInterrupts)
             wipe(pendingCasts)
 
-            -- Route through HandleKickByName with dedup (layer 3 = "correlated")
-            local found = false
-            for gi = 1, MAX_GROUPS do
-                for _, entry in ipairs(groups[gi].rotation) do
-                    if entry.name == shortName then
-                        local spellID = entry.spellID
-                        if not spellID or spellID == 0 then
-                            local classInfo = entry.class and KICK_SPELLS[entry.class]
-                            spellID = classInfo and classInfo.spellID or 0
-                        end
-                        HandleKickByName(shortName, spellID, gi, "correlated")
-                        found = true
-                        break
-                    end
-                end
-                if found then break end
-            end
-            if not found then
-                -- Player kicked but not in rotation — auto-add and handle
-                Log:Log("INFO", string.format("KickCorrel: %s kicked (not in rotation) — auto-adding to group 1", shortName))
-                local classInfo = nil
-                pcall(function()
-                    local _, c = UnitClass(bestUnit)
-                    if c and not issecretvalue(c) then
-                        classInfo = KICK_SPELLS[c:sub(1,1):upper() .. c:sub(2):lower()]
-                    end
-                end)
-                local spellID = classInfo and classInfo.spellID or 0
-                local cd = classInfo and classInfo.cd or 15
-                table.insert(groups[1].rotation, { name = shortName, class = nil, spellID = spellID, cd = cd })
-                if #groups[1].rotation == 1 then groups[1].currentIdx = 1 end
-                if 1 == 1 then kickRotation = groups[1].rotation end
-                HandleKickByName(shortName, spellID, 1, "correlated")
+            -- Route via KT module function (groups is defined later in file,
+            -- but KT:_correlRoute is set after groups exists)
+            if KT._correlRoute then
+                KT:_correlRoute(shortName, bestUnit)
+            else
+                Log:Log("DEBUG", "KickCorrel: routing deferred (groups not yet initialized)")
             end
         end
         return  -- Already cleaned up
@@ -323,6 +296,53 @@ local lastAlertTime = groups[1].lastAlertTime
 local onUpdateFrame = groups[1].onUpdateFrame
 local onUpdateThrottle = groups[1].onUpdateThrottle
 local rotationUnitMap = groups[1].unitMap
+
+------------------------------------------------------------------------
+-- Correlation routing (deferred — groups must exist before this runs)
+------------------------------------------------------------------------
+
+local CLASSTOKEN_TO_NAME = {
+    DEATHKNIGHT="Death Knight", DEMONHUNTER="Demon Hunter", DRUID="Druid",
+    EVOKER="Evoker", HUNTER="Hunter", MAGE="Mage", MONK="Monk",
+    PALADIN="Paladin", PRIEST="Priest", ROGUE="Rogue", SHAMAN="Shaman",
+    WARLOCK="Warlock", WARRIOR="Warrior",
+}
+
+function KT:_correlRoute(shortName, bestUnit)
+    Log:Log("DEBUG", string.format("KickCorrel: routing %s, rotation size=%d", shortName, #groups[1].rotation))
+    local found = false
+    for gi = 1, MAX_GROUPS do
+        for _, entry in ipairs(groups[gi].rotation) do
+            if entry.name == shortName then
+                local spellID = entry.spellID
+                if not spellID or spellID == 0 then
+                    local classInfo = entry.class and KICK_SPELLS[entry.class]
+                    spellID = classInfo and classInfo.spellID or 0
+                end
+                HandleKickByName(shortName, spellID, gi, "correlated")
+                found = true
+                break
+            end
+        end
+        if found then break end
+    end
+    if not found then
+        Log:Log("INFO", string.format("KickCorrel: %s kicked (not in rotation) — auto-adding to group 1", shortName))
+        local classInfo = nil
+        pcall(function()
+            local _, c = UnitClass(bestUnit)
+            if c and not (issecretvalue and issecretvalue(c)) then
+                classInfo = KICK_SPELLS[CLASSTOKEN_TO_NAME[c:upper()] or ""]
+            end
+        end)
+        local spellID = classInfo and classInfo.spellID or 0
+        local cd = classInfo and classInfo.cd or 15
+        table.insert(groups[1].rotation, { name = shortName, class = nil, spellID = spellID, cd = cd })
+        if #groups[1].rotation == 1 then groups[1].currentIdx = 1 end
+        kickRotation = groups[1].rotation
+        HandleKickByName(shortName, spellID, 1, "correlated")
+    end
+end
 
 ------------------------------------------------------------------------
 -- Bar Creation
