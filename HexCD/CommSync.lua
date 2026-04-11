@@ -14,7 +14,12 @@ HexCD = HexCD or {}
 HexCD.CommSync = {}
 
 local CS = HexCD.CommSync
+local Config = HexCD.Config
 local Log = HexCD.DebugLog
+
+-- Forward declarations (defined later, needed by OnEvent closures)
+local ScanAndPopulateParty
+local PrePopulatePersonalCDs
 
 ------------------------------------------------------------------------
 -- Constants
@@ -386,6 +391,7 @@ local function OnEvent(self, event, ...)
         if not rosterTimer then
             rosterTimer = C_Timer.After(2, function()
                 rosterTimer = nil
+                ScanAndPopulateParty()
                 SendCDHello()
             end)
         end
@@ -395,6 +401,7 @@ local function OnEvent(self, event, ...)
         -- Short delay to let group state settle
         CancelHelloRetry()
         C_Timer.After(1, function()
+            ScanAndPopulateParty()
             lastHelloTime = 0  -- clear debounce so hello goes through
             SendCDHello()
         end)
@@ -451,6 +458,59 @@ local function OnEvent(self, event, ...)
 end
 
 ------------------------------------------------------------------------
+-- Party auto-discovery (works without CDHELLO — uses UnitClass)
+------------------------------------------------------------------------
+
+--- Pre-populate PERSONAL category spells for a unit as "ready".
+--- @param unitID string e.g. "player", "party1"
+--- @param name string Player name (stripped of realm)
+PrePopulatePersonalCDs = function(unitID, name)
+    pcall(function()
+        local DB = HexCD.SpellDB
+        if not DB or not DB.GetAllSpells then return end
+        local unitClass = select(2, UnitClass(unitID))
+        if not unitClass or (issecretvalue and issecretvalue(unitClass)) then
+            unitClass = UnitClassBase and UnitClassBase(unitID)
+        end
+        if not unitClass then return end
+        unitClass = unitClass:upper()
+        partyCD[name] = partyCD[name] or {}
+        local count = 0
+        for spellID, info in pairs(DB:GetAllSpells()) do
+            if info.class == unitClass and info.category == "PERSONAL" then
+                if not partyCD[name][spellID] then
+                    partyCD[name][spellID] = {
+                        readyTime = 0,
+                        effectiveCD = info.cd,
+                        castTime = 0,
+                    }
+                    count = count + 1
+                end
+            end
+        end
+        if count > 0 then
+            Log:Log("DEBUG", string.format("CommSync: pre-populated %d PERSONAL spells for %s (%s)", count, name, unitClass))
+        end
+    end)
+end
+
+--- Scan all party members and pre-populate their personal CDs.
+--- Called on init, GROUP_ROSTER_UPDATE, and PLAYER_ENTERING_WORLD.
+ScanAndPopulateParty = function()
+    if not HexCD.Util.IsInAnyGroup() then return end
+    for i = 1, 4 do
+        local uid = "party" .. i
+        pcall(function()
+            if not UnitExists(uid) then return end
+            local name = UnitName(uid)
+            if not name or (issecretvalue and issecretvalue(name)) then return end
+            name = StripRealm(name)
+            PrePopulatePersonalCDs(uid, name)
+        end)
+    end
+end
+
+------------------------------------------------------------------------
 -- Init
 ------------------------------------------------------------------------
 
@@ -494,31 +554,11 @@ function CS:Init()
     end
 
     -- Pre-populate local player's personal CDs as "ready" so icons show immediately
-    pcall(function()
-        local DB = HexCD.SpellDB
-        if not DB or not DB.GetAllSpells then return end
-        partyCD[localPlayerName] = partyCD[localPlayerName] or {}
-        local playerClass = select(2, UnitClass("player"))
-        if not playerClass or (issecretvalue and issecretvalue(playerClass)) then
-            playerClass = UnitClassBase and UnitClassBase("player")
-        end
-        if not playerClass then return end
-        playerClass = playerClass:upper()
-        local count = 0
-        for spellID, info in pairs(DB:GetAllSpells()) do
-            if info.class == playerClass and info.category == "PERSONAL" then
-                if not partyCD[localPlayerName][spellID] then
-                    partyCD[localPlayerName][spellID] = {
-                        readyTime = 0,
-                        effectiveCD = info.cd,
-                        castTime = 0,
-                    }
-                    count = count + 1
-                end
-            end
-        end
-        Log:Log("DEBUG", string.format("CommSync: pre-populated %d PERSONAL spells for %s (%s)", count, localPlayerName, playerClass))
-    end)
+    PrePopulatePersonalCDs("player", localPlayerName)
+
+    -- Scan party members and pre-populate their personal CDs too
+    -- (works even without CDHELLO — discovers class from UnitClass)
+    ScanAndPopulateParty()
 
     -- Send initial hello if already in a group
     SendCDHello()

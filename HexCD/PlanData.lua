@@ -1,5 +1,5 @@
 -- HexCD Bundled Plan Data
--- Generated: 2026-04-11T05:29:25.913Z
+-- Generated: 2026-04-11T06:06:03.117Z
 -- This file is auto-loaded by the addon. Plans here are merged with SavedVariables.
 -- Structure: BundledPlans[encounterID][difficulty] = plan
 
@@ -5809,62 +5809,95 @@ HexCDReminder.BundledDungeonPlans[560] = {
     3214,
   },
   notes = "Linear route, 3 bosses. Lust on Boss 3. Withering Miasma from Vordaza is the healing check of the dungeon. Top parse reference (2026-04-08): Vitalitie +20 (128k HPS, 24 Convokes/8 Tranqs/32min), Jawadruid +19 (115k HPS, 25 Convokes/9 Tranqs/31.5min). All top parses use Convoke build (Cenarius Guidance, 60s CD). Convoke every 60-80s, Tranq every 3-4min on boss/big trash.",
+  mobProfile = {
+    casterEliteDPS = 20000,
+    meleeEliteDPS = 10000,
+    lieutenantDPS = 25000,
+    trivialDPS = 3000,
+  },
+  trashCDTiers = {
+    tier0 = {
+      {
+        abilityGameID = 768,
+        abilityName = "Cat Weave",
+        scheduling = "immediate",
+        windowSec = 30,
+      },
+    },
+    tier1 = {
+      {
+        abilityGameID = 774,
+        abilityName = "Ramp",
+        scheduling = "immediate",
+        windowSec = 8,
+      },
+      {
+        abilityGameID = 391528,
+        abilityName = "Convoke the Spirits",
+        scheduling = "sequential",
+        order = 1,
+        delaySec = 5,
+        windowSec = 9,
+      },
+    },
+    tier2 = {
+      {
+        abilityGameID = 774,
+        abilityName = "Ramp",
+        scheduling = "immediate",
+        windowSec = 8,
+      },
+      {
+        abilityGameID = 391528,
+        abilityName = "Convoke the Spirits",
+        scheduling = "sequential",
+        order = 1,
+        delaySec = 5,
+        windowSec = 9,
+      },
+      {
+        abilityGameID = 740,
+        abilityName = "Tranquility",
+        scheduling = "sequential",
+        order = 2,
+        delaySec = 20,
+        windowSec = 9,
+      },
+    },
+    tier3 = {
+      {
+        abilityGameID = 774,
+        abilityName = "Ramp",
+        scheduling = "immediate",
+        windowSec = 8,
+      },
+      {
+        abilityGameID = 391528,
+        abilityName = "Convoke the Spirits",
+        scheduling = "sequential",
+        order = 1,
+        delaySec = 5,
+        windowSec = 9,
+      },
+      {
+        abilityGameID = 33891,
+        abilityName = "Incarnation: Tree of Life",
+        scheduling = "sequential",
+        order = 2,
+        delaySec = 12,
+        windowSec = 30,
+      },
+      {
+        abilityGameID = 740,
+        abilityName = "Tranquility",
+        scheduling = "sequential",
+        order = 3,
+        delaySec = 25,
+        windowSec = 9,
+      },
+    },
+  },
   sections = {
-    {
-      sectionId = "trash-1",
-      label = "Trash 1: Opening Packs",
-      type = "trash",
-      creatureIDs = {
-        0,
-      },
-      maxCDs = 1,
-      assignments = {
-        {
-          timeSec = 5,
-          abilityGameID = 391528,
-          abilityName = "Convoke the Spirits",
-          rationale = "Opener — burst heal through first pull damage.",
-          scheduling = {
-            mode = "sequential",
-            order = 1,
-            minDelaySec = 5,
-          },
-        },
-      },
-      notes = "Standard opening pull. Interrupt priority casts.",
-    },
-    {
-      sectionId = "trash-2",
-      label = "Trash 2: Pre-Boss Pack",
-      type = "trash",
-      creatureIDs = {
-        0,
-      },
-      maxCDs = 1,
-      assignments = {
-        {
-          timeSec = 0,
-          abilityGameID = 774,
-          abilityName = "Ramp",
-          rationale = "Pre-HoT for sustained trash damage.",
-          scheduling = {
-            mode = "immediate",
-          },
-        },
-        {
-          timeSec = 8,
-          abilityGameID = 740,
-          abilityName = "Tranquility",
-          rationale = "Bigger pack — Tranq to stabilize through overlapping casts.",
-          scheduling = {
-            mode = "sequential",
-            order = 1,
-            minDelaySec = 8,
-          },
-        },
-      },
-      notes = "Save Convoke for boss.",
-    },
     {
       sectionId = "boss-1",
       label = "Boss: Muro'jin & Nekraxx",
@@ -5993,29 +6026,6 @@ HexCDReminder.BundledDungeonPlans[560] = {
       notes = "Use Freezing Traps to counter Carrion Swoop. Kill bosses at similar health to avoid enrage. Dispel Infected Pinions.",
     },
     {
-      sectionId = "trash-3",
-      label = "Trash 3: Mid-Dungeon",
-      type = "trash",
-      creatureIDs = {
-        0,
-      },
-      maxCDs = 1,
-      assignments = {
-        {
-          timeSec = 5,
-          abilityGameID = 391528,
-          abilityName = "Convoke the Spirits",
-          rationale = "Quick burst heal on pull. Save major CDs for Vordaza.",
-          scheduling = {
-            mode = "sequential",
-            order = 1,
-            minDelaySec = 5,
-          },
-        },
-      },
-      notes = "Clean this fast. Save Tree + Tranq for boss.",
-    },
-    {
       sectionId = "boss-2",
       label = "Boss: Vordaza",
       type = "boss",
@@ -6139,38 +6149,6 @@ HexCDReminder.BundledDungeonPlans[560] = {
         },
       },
       notes = "DPS the Necrotic Convergence shield fast. Force Unstable Phantoms to collide — do NOT attack them. Constant rot damage from Miasma.",
-    },
-    {
-      sectionId = "trash-4",
-      label = "Trash 4: Pre-Final Boss",
-      type = "trash",
-      creatureIDs = {
-        0,
-      },
-      maxCDs = 1,
-      assignments = {
-        {
-          timeSec = 0,
-          abilityGameID = 774,
-          abilityName = "Ramp",
-          rationale = "Pre-HoT for dangerous pre-boss pack.",
-          scheduling = {
-            mode = "immediate",
-          },
-        },
-        {
-          timeSec = 8,
-          abilityGameID = 391528,
-          abilityName = "Convoke the Spirits",
-          rationale = "Burst heal through the pull. Last trash before final boss.",
-          scheduling = {
-            mode = "sequential",
-            order = 1,
-            minDelaySec = 8,
-          },
-        },
-      },
-      notes = "Last pack. Save major CDs for Boss 3.",
     },
     {
       sectionId = "boss-3",

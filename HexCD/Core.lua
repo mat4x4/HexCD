@@ -4,7 +4,7 @@
 HexCD = HexCD or {}
 
 local ADDON_NAME = "HexCD"
-local VERSION = "1.4.0"
+local VERSION = "1.4.1"
 
 local Config = HexCD.Config
 local Log = HexCD.DebugLog
@@ -162,6 +162,9 @@ SlashCmdList["HEXCD"] = function(msg)
 
     elseif cmd == "unlockkick" or cmd == "movekick" then
         if HexCD.KickTracker then HexCD.KickTracker:Unlock() end
+
+    elseif cmd == "debugframes" then
+        if HexCD.PartyCDDisplay then HexCD.PartyCDDisplay:DebugFrames() end
 
     else
         if GUI then GUI:Toggle() end

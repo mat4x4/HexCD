@@ -192,10 +192,27 @@ local function FrameMatchesPlayer(f, playerName)
     return false
 end
 
+--- Scan children of a container frame for one whose unit matches playerName.
+local function ScanChildFrames(container, playerName)
+    if not container or not container.GetChildren then return nil end
+    local ok, children = pcall(container.GetChildren, container)
+    if not ok or not children then return nil end
+    -- GetChildren returns multiple values, not a table — wrap in table
+    local list = { children }
+    -- In some WoW versions GetChildren returns a table, in others varargs
+    if type(list[1]) == "table" then list = list[1] end
+    for _, child in ipairs(list) do
+        if type(child) == "table" and FrameMatchesPlayer(child, playerName) then
+            return child
+        end
+    end
+    return nil
+end
+
 local function FindUnitFrame(playerName)
     local Log = HexCD.DebugLog
 
-    -- Danders API
+    -- 1. Danders API (addon unit frames)
     if DandersFrames_GetAllFrames then
         local ok, allFrames = pcall(DandersFrames_GetAllFrames)
         if ok and allFrames then
@@ -207,7 +224,7 @@ local function FindUnitFrame(playerName)
         end
     end
 
-    -- Fallback: frame name patterns
+    -- 2. Named frame patterns (Cell, ElvUI, older Blizzard)
     for _, pattern in ipairs(UF_PATTERNS) do
         for i = 1, pattern.count do
             local frameName = pattern.noIndex and pattern.frames or string.format(pattern.frames, i)
@@ -218,7 +235,19 @@ local function FindUnitFrame(playerName)
         end
     end
 
-    -- UnitID-based fallback: find which partyN matches, then scan Blizzard frames by unitID
+    -- 3. Blizzard EditMode containers (TWW/Midnight default frames)
+    --    CompactPartyFrame contains member frames as children
+    --    CompactRaidFrameContainer contains raid-style party frames
+    local containers = {
+        _G["CompactPartyFrame"],
+        _G["CompactRaidFrameContainer"],
+    }
+    for _, container in ipairs(containers) do
+        local match = ScanChildFrames(container, playerName)
+        if match then return match end
+    end
+
+    -- 4. UnitID-based fallback: match player name → unitID, then scan frames by unitID
     local targetUnit = nil
     for i = 1, 4 do
         local uid = "party" .. i
@@ -236,7 +265,6 @@ local function FindUnitFrame(playerName)
     end
 
     if targetUnit then
-        -- Scan Blizzard compact frames matching this exact unitID
         for i = 1, 5 do
             local f = _G["CompactPartyFrameMember" .. i]
             if f and GetFrameUnit(f) == targetUnit then return f end
@@ -245,7 +273,6 @@ local function FindUnitFrame(playerName)
             local f = _G["CompactRaidFrame" .. i]
             if f and GetFrameUnit(f) == targetUnit then return f end
         end
-        -- Last resort: PlayerFrame for local player
         if targetUnit == "player" and PlayerFrame and PlayerFrame:IsShown() then
             return PlayerFrame
         end
@@ -255,6 +282,76 @@ local function FindUnitFrame(playerName)
         Log:Log("DEBUG", "FindUnitFrame: no frame found for " .. tostring(playerName))
     end
     return nil
+end
+
+--- Debug command: dump all detectable unit frames and their units.
+--- Call via /hexcd debugframes
+function PCD:DebugFrames()
+    local Log = HexCD.DebugLog
+    if not Log then return end
+    Log:Log("INFO", "=== FindUnitFrame Debug Dump ===")
+
+    -- Dump party unit IDs
+    for i = 1, 4 do
+        local uid = "party" .. i
+        local ok, name = pcall(UnitName, uid)
+        Log:Log("INFO", string.format("  %s → %s", uid, ok and tostring(name) or "nil"))
+    end
+    local ok, pname = pcall(UnitName, "player")
+    Log:Log("INFO", string.format("  player → %s", ok and tostring(pname) or "nil"))
+
+    -- Dump named patterns
+    for _, pattern in ipairs(UF_PATTERNS) do
+        for i = 1, math.min(pattern.count, 5) do
+            local frameName = pattern.noIndex and pattern.frames or string.format(pattern.frames, i)
+            local f = _G[frameName]
+            if f then
+                local unit = GetFrameUnit(f)
+                local shown = f.IsShown and f:IsShown()
+                Log:Log("INFO", string.format("  %s: unit=%s shown=%s", frameName, tostring(unit), tostring(shown)))
+            end
+        end
+    end
+
+    -- Dump Blizzard containers
+    local containers = { "CompactPartyFrame", "CompactRaidFrameContainer" }
+    for _, cname in ipairs(containers) do
+        local c = _G[cname]
+        if c then
+            Log:Log("INFO", string.format("  %s: EXISTS, shown=%s", cname, tostring(c.IsShown and c:IsShown())))
+            if c.GetChildren then
+                local ok2, kids = pcall(c.GetChildren, c)
+                if ok2 then
+                    local list = type(kids) == "table" and kids or { kids }
+                    for idx, kid in ipairs(list) do
+                        if type(kid) == "table" then
+                            local unit = GetFrameUnit(kid)
+                            local kname = kid.GetName and kid:GetName() or "anon"
+                            local shown = kid.IsShown and kid:IsShown()
+                            Log:Log("INFO", string.format("    child[%d] %s: unit=%s shown=%s", idx, tostring(kname), tostring(unit), tostring(shown)))
+                        end
+                    end
+                end
+            end
+        else
+            Log:Log("INFO", string.format("  %s: NOT FOUND", cname))
+        end
+    end
+
+    -- Test FindUnitFrame for each party member
+    Log:Log("INFO", "--- FindUnitFrame results ---")
+    local CS = HexCD.CommSync
+    if CS then
+        local partyCD = CS:GetPartyCD()
+        for pName in pairs(partyCD) do
+            if type(pName) == "string" and pName:sub(1,1) ~= "_" then
+                local uf = FindUnitFrame(pName)
+                local ufName = uf and (uf.GetName and uf:GetName() or "anon-frame") or "nil"
+                Log:Log("INFO", string.format("  FindUnitFrame('%s') → %s", pName, ufName))
+            end
+        end
+    end
+    Log:Log("INFO", "=== End Debug Dump ===")
 end
 
 ------------------------------------------------------------------------
@@ -279,6 +376,7 @@ local function GetOrCreatePersonalBar(playerName)
     return personalBars[playerName]
 end
 
+local personalBarsDebugOnce = true
 local function UpdatePersonalBars(partyCD, now)
     local used = {}
     local side = Config and Config:Get("partyCDAnchorSide") or "RIGHT"
@@ -306,6 +404,24 @@ local function UpdatePersonalBars(partyCD, now)
                         table.insert(spells, { id = spellID, state = state })
                     end
                 end
+            end
+
+            -- One-time diagnostic: log per-player spell count and frame detection
+            if personalBarsDebugOnce then
+                local totalKeys, enabledCount = 0, 0
+                for k, v in pairs(pData) do
+                    if type(k) == "number" then
+                        totalKeys = totalKeys + 1
+                        local en = IsSpellEnabled(k)
+                        local dbInfo = HexCD.SpellDB and HexCD.SpellDB:GetSpell(k)
+                        local cat = dbInfo and dbInfo.category or "nil"
+                        if en and cat == "PERSONAL" then enabledCount = enabledCount + 1 end
+                    end
+                end
+                local uf = FindUnitFrame(playerName)
+                local ufName = uf and (uf.GetName and uf:GetName() or "frame") or "nil"
+                Log:Log("DEBUG", string.format("PersonalBars: %s — %d keys, %d PERSONAL enabled, %d matched, frame=%s",
+                    playerName, totalKeys, enabledCount, #spells, ufName))
             end
 
             if #spells > 0 then
@@ -359,6 +475,8 @@ local function UpdatePersonalBars(partyCD, now)
             end
         end
     end
+
+    if personalBarsDebugOnce then personalBarsDebugOnce = false end
 
     for name, bar in pairs(personalBars) do
         if not used[name] then bar.container:Hide() end
