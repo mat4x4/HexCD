@@ -357,9 +357,31 @@ end
 local function OnEvent(self, event, ...)
     if event == "UNIT_SPELLCAST_SUCCEEDED" then
         local unit, _, spellID = ...
-        if unit ~= "player" then return end
 
-        -- Only handle spells NOT already covered by CooldownTracker callback
+        -- Track party member personal CD casts (partyN units)
+        if unit ~= "player" then
+            -- spellID may be a secret value for non-player units (WoW taint)
+            if issecretvalue and issecretvalue(spellID) then return end
+            if type(spellID) ~= "number" then return end
+            pcall(function()
+                local n = UnitName(unit)
+                if not n or (issecretvalue and issecretvalue(n)) then return end
+                local unitName = StripRealm(n)
+                if not unitName or not partyCD[unitName] or not partyCD[unitName][spellID] then return end
+                local info = HexCD.SpellDB and HexCD.SpellDB:GetSpell(spellID)
+                if not info or info.category ~= "PERSONAL" then return end
+                local now = GetTime()
+                partyCD[unitName][spellID] = {
+                    readyTime = now + info.cd,
+                    effectiveCD = info.cd,
+                    castTime = now,
+                }
+                Log:Log("DEBUG", string.format("CommSync: %s cast %s(%d) — CD %ds", unitName, info.name or "spell", spellID, info.cd))
+            end)
+            return
+        end
+
+        -- Local player: only handle spells NOT already covered by CooldownTracker callback
         local info = HexCD.SpellDB and HexCD.SpellDB:GetSpell(spellID)
         if not info then return end
 

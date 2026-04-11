@@ -51,6 +51,9 @@ local Config = HexCD.Config
 local Log = HexCD.DebugLog
 local Util = HexCD.Util
 
+-- Forward declaration (defined later, called from _correlRoute)
+local HandleKickByName
+
 ------------------------------------------------------------------------
 -- Constants
 ------------------------------------------------------------------------
@@ -798,7 +801,7 @@ end
 -- skip the duplicate. Layer 3 (correlation, ~30ms) wins over Layer 4 (addon msg, ~300ms).
 local DEDUP_WINDOW = 2.0
 
-local function HandleKickByName(casterName, spellID, groupIdx, source)
+HandleKickByName = function(casterName, spellID, groupIdx, source)
     groupIdx = groupIdx or 1
     source = source or "unknown"
     local gs = groups[groupIdx]
