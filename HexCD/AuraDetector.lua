@@ -272,7 +272,7 @@ local function ProcessAuraChanges(unit)
             if Log then
                 local evStr = ""
                 for k in pairs(evidence) do evStr = evStr .. k .. " " end
-                Log:Log("DEBUG", string.format("AuraDetector: %s NEW defensive aura id=%d ev={%s}",
+                Log:Log("DEBUG", string.format("AuraDetector: %s NEW defensive aura id=%s ev={%s}",
                     unitName, id, evStr))
             end
         end
