@@ -333,9 +333,9 @@ end
 
 local function IsDispellableAura(aura)
     if not aura then return false end
-    if not aura.isHarmful then return false end
-    -- In Midnight, dispelName may be a secret value — that's OK, it means
-    -- the debuff IS dispellable (Blizzard only secrets the value, not its existence).
+    -- Skip isHarmful check — we already filter with "HARMFUL" in GetAuraDataByIndex.
+    -- Blizzard taints isHarmful as a secret boolean in Midnight 12.0+, so direct
+    -- boolean tests on it cause taint errors.
     -- A nil dispelName means not dispellable. A non-nil (even secret) means dispellable.
     if aura.dispelName == nil then return false end
     return true
