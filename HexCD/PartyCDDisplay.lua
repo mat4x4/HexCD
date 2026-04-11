@@ -1,11 +1,14 @@
 ------------------------------------------------------------------------
 -- HexCD: PartyCDDisplay — Party CD icon grid with independent trackers
 --
--- Four independent tracker bars, each movable:
---   1. PERSONAL    — Personal defensives + immunities (per-player, anchored to unit frames)
---   2. PARTY_RANGED  — Rally, VE etc. (floating bar showing all players)
---   3. PARTY_STACKED — AMZ, Darkness, Barrier etc. (floating bar)
---   4. HEALING     — Tranq, Hymn, Convoke etc. (floating bar)
+-- Independent tracker bars, each movable:
+--   1. PERSONAL           — Personal defensives (per-player, anchored to unit frames)
+--   2. RANGED_DEFENSIVE   — Rally, VE (floating bar)
+--   3. STACKED_DEFENSIVE  — AMZ, Darkness, Barrier (floating bar)
+--   4. UTILITY            — Roar, Freedom, Grip (floating bar)
+--   5. HEALING            — Tranq, Hymn, Convoke (floating bar)
+--   6. ST_CC              — Poly, Hex, Repentance (floating bar)
+--   7. AOE_CC             — Cap Totem, Ring of Frost (floating bar)
 --
 -- Personal defensives anchor to each player's unit frame.
 -- Party-wide CD bars are floating panels showing who has what ready.
@@ -32,11 +35,12 @@ local BAR_NAME_WIDTH = 55
 local ANCHORED_CATEGORIES = { PERSONAL = true }
 
 -- Categories that get their own floating bar
-local FLOATING_CATEGORIES = { "PARTY_RANGED", "PARTY_STACKED", "HEALING" }
+local FLOATING_CATEGORIES = { "EXTERNAL_DEFENSIVE", "UTILITY", "HEALING", "CC" }
 local FLOATING_TITLES = {
-    PARTY_RANGED  = "|cFF44CC44Ranged Party CDs|r",
-    PARTY_STACKED = "|cFFCC8844Stacked Party CDs|r",
-    HEALING       = "|cFF4488CCHealing CDs|r",
+    EXTERNAL_DEFENSIVE = "|cFF44CC44External Defensives|r",
+    UTILITY            = "|cFF88AACCUtility|r",
+    HEALING            = "|cFF4488CCHealing CDs|r",
+    CC                 = "|cFFCC44CCCrowd Control|r",
 }
 
 ------------------------------------------------------------------------
@@ -379,12 +383,17 @@ end
 local personalBarsDebugOnce = true
 local function UpdatePersonalBars(partyCD, now)
     local used = {}
-    local side = Config and Config:Get("partyCDAnchorSide") or "RIGHT"
-    local ofsX = Config and Config:Get("partyCDOfsX") or 4
-    local ofsY = Config and Config:Get("partyCDOfsY") or 0
-    local growth = Config and Config:Get("partyCDGrowth") or "RIGHT"
-    local iconSize = Config and Config:Get("partyCDIconSize") or ICON_SIZE
-    local padding = Config and Config:Get("partyCDIconPadding") or ICON_PADDING
+    -- Read from new hexcd_personal_* keys (fall back to old keys for compat)
+    local side = Config and Config:Get("hexcd_personal_anchorSide") or Config:Get("partyCDAnchorSide") or "RIGHT"
+    local ofsX = Config and Config:Get("hexcd_personal_ofsX") or Config:Get("partyCDOfsX") or 4
+    local ofsY = Config and Config:Get("hexcd_personal_ofsY") or Config:Get("partyCDOfsY") or 0
+    local growth = Config and Config:Get("hexcd_personal_growth") or Config:Get("partyCDGrowth") or "RIGHT"
+    local iconSize = Config and Config:Get("hexcd_personal_iconSize") or Config:Get("partyCDIconSize") or ICON_SIZE
+    local padding = Config and Config:Get("hexcd_personal_iconPadding") or Config:Get("partyCDIconPadding") or ICON_PADDING
+    local maxPerRow = Config and Config:Get("hexcd_personal_maxIconsPerRow") or 6
+    local maxRows = Config and Config:Get("hexcd_personal_maxRows") or 1
+    local hideReady = Config and Config:Get("hexcd_personal_hideReady") or false
+    local maxTotal = maxPerRow * maxRows
 
     local point, relPoint
     if side == "LEFT" then point, relPoint = "TOPRIGHT", "TOPLEFT"; ofsX = -ofsX
@@ -395,18 +404,21 @@ local function UpdatePersonalBars(partyCD, now)
 
     for playerName, pData in pairs(partyCD) do
         if type(pData) == "table" then
-            -- Collect personal defensives for this player
             local spells = {}
             for spellID, state in pairs(pData) do
                 if type(spellID) == "number" and type(state) == "table" and IsSpellEnabled(spellID) then
                     local dbInfo = HexCD.SpellDB and HexCD.SpellDB:GetSpell(spellID)
                     if dbInfo and dbInfo.category == "PERSONAL" then
-                        table.insert(spells, { id = spellID, state = state })
+                        local remaining = math.max(0, state.readyTime - now)
+                        -- hideReady: skip spells that are off cooldown
+                        if not hideReady or remaining > 0 then
+                            table.insert(spells, { id = spellID, state = state })
+                        end
                     end
                 end
             end
 
-            -- One-time diagnostic: log per-player spell count and frame detection
+            -- One-time diagnostic
             if personalBarsDebugOnce then
                 local totalKeys, enabledCount = 0, 0
                 for k, v in pairs(pData) do
@@ -420,7 +432,7 @@ local function UpdatePersonalBars(partyCD, now)
                 end
                 local uf = FindUnitFrame(playerName)
                 local ufName = uf and (uf.GetName and uf:GetName() or "frame") or "nil"
-                Log:Log("DEBUG", string.format("PersonalBars: %s — %d keys, %d PERSONAL enabled, %d matched, frame=%s",
+                Log:Log("DEBUG", string.format("PersonalBars: %s — %d keys, %d PERSONAL enabled, %d visible, frame=%s",
                     playerName, totalKeys, enabledCount, #spells, ufName))
             end
 
@@ -445,30 +457,38 @@ local function UpdatePersonalBars(partyCD, now)
                     bar.unitFrame = uf
                     bar.container:Show()
 
+                    -- Multi-row layout
                     local iconIdx = 0
                     for _, spell in ipairs(spells) do
-                        if iconIdx >= MAX_ICONS_PER_PLAYER then break end
+                        if iconIdx >= maxTotal then break end
                         iconIdx = iconIdx + 1
                         local btn = bar.icons[iconIdx]
                         btn:SetSize(iconSize, iconSize)
                         btn:ClearAllPoints()
+
+                        local row = math.floor((iconIdx - 1) / maxPerRow)
+                        local col = (iconIdx - 1) % maxPerRow
+
                         if growth == "LEFT" then
-                            btn:SetPoint("RIGHT", -(iconIdx - 1) * (iconSize + padding), 0)
+                            btn:SetPoint("TOPRIGHT", -(col * (iconSize + padding)), -(row * (iconSize + padding)))
                         elseif growth == "DOWN" then
-                            btn:SetPoint("TOP", 0, -(iconIdx - 1) * (iconSize + padding))
+                            btn:SetPoint("TOPLEFT", col * (iconSize + padding), -(row * (iconSize + padding)))
                         elseif growth == "UP" then
-                            btn:SetPoint("BOTTOM", 0, (iconIdx - 1) * (iconSize + padding))
-                        else
-                            btn:SetPoint("LEFT", (iconIdx - 1) * (iconSize + padding), 0)
+                            btn:SetPoint("BOTTOMLEFT", col * (iconSize + padding), row * (iconSize + padding))
+                        else -- RIGHT
+                            btn:SetPoint("TOPLEFT", col * (iconSize + padding), -(row * (iconSize + padding)))
                         end
                         UpdateIcon(btn, spell.id, spell.state, now)
                     end
                     for i = iconIdx + 1, MAX_ICONS_PER_PLAYER do bar.icons[i]:Hide() end
-                    if growth == "DOWN" or growth == "UP" then
-                        bar.container:SetSize(iconSize, iconIdx * (iconSize + padding))
-                    else
-                        bar.container:SetSize(iconIdx * (iconSize + padding), iconSize)
-                    end
+
+                    -- Size container to fit all rows/cols
+                    local usedRows = math.ceil(iconIdx / maxPerRow)
+                    local usedCols = math.min(iconIdx, maxPerRow)
+                    bar.container:SetSize(
+                        usedCols * (iconSize + padding),
+                        usedRows * (iconSize + padding)
+                    )
                 else
                     bar.container:Hide()
                 end
@@ -526,9 +546,10 @@ local function CreateFloatingBar(category)
         f:SetPoint(saved.point, UIParent, saved.relPoint, saved.x, saved.y)
     else
         local defaults = {
-            PARTY_RANGED  = { "TOPRIGHT", -200, -100 },
-            PARTY_STACKED = { "TOPRIGHT", -200, -200 },
-            HEALING       = { "TOPRIGHT", -200, -300 },
+            EXTERNAL_DEFENSIVE = { "TOPRIGHT", -200, -100 },
+            UTILITY            = { "TOPRIGHT", -200, -200 },
+            HEALING            = { "TOPRIGHT", -200, -300 },
+            CC                 = { "TOPRIGHT", -200, -400 },
         }
         local d = defaults[category] or { "CENTER", 0, 0 }
         f:SetPoint(d[1], UIParent, d[1], d[2], d[3])
@@ -558,6 +579,8 @@ local function CreateFloatingBar(category)
     end
 
     f:Hide()
+    f:EnableMouse(false)  -- start locked
+    f._unlocked = false
     return f
 end
 
@@ -593,7 +616,8 @@ local function UpdateFloatingBar(category, partyCD, now)
     table.sort(players, function(a, b) return a.name < b.name end)
 
     if #players == 0 then
-        bar:Hide()
+        -- Don't hide if user is positioning (unlocked mode)
+        if not bar._unlocked then bar:Hide() end
         return
     end
 
@@ -620,6 +644,13 @@ local function UpdateFloatingBar(category, partyCD, now)
         8 + BAR_NAME_WIDTH + MAX_ICONS_PER_PLAYER * (ICON_SIZE + ICON_PADDING),
         18 + rowIdx * BAR_ROW_HEIGHT
     )
+    -- Restore normal appearance (in case was in unlock/positioning mode)
+    if bar._unlocked then
+        bar:SetBackdropBorderColor(1.0, 0.8, 0.0, 0.9)
+    else
+        bar:SetBackdropBorderColor(0.3, 0.3, 0.35, 0.6)
+    end
+    if bar.title then bar.title:SetText(FLOATING_TITLES[category] or category) end
     bar:Show()
 end
 
@@ -702,6 +733,10 @@ function PCD:Init()
     updateFrame:SetScript("OnUpdate", OnUpdate)
     isVisible = true
     updateFrame:Show()
+    -- Pre-create all floating bar frames so lock/unlock works immediately
+    for _, cat in ipairs(FLOATING_CATEGORIES) do
+        GetFloatingBar(cat)
+    end
     Log:Log("DEBUG", "PartyCDDisplay: initialized (always-on)")
 end
 
@@ -736,14 +771,59 @@ function PCD:ShowDetached()
     self:Show()
 end
 
-function PCD:Lock()
-    for _, bar in pairs(floatingBars) do bar:EnableMouse(false) end
-    print("|cFF88CCFF[HexCD]|r Party CD bars locked.")
+function PCD:Lock(category)
+    if category then
+        local bar = floatingBars[category]
+        if bar then
+            bar:EnableMouse(false)
+            bar._unlocked = false
+            -- Hide if no data is being displayed (no visible rows)
+            local hasData = false
+            if bar.rows then
+                for _, row in ipairs(bar.rows) do
+                    if row:IsShown() then hasData = true; break end
+                end
+            end
+            if not hasData then bar:Hide() end
+            if bar.title then bar.title:SetText(FLOATING_TITLES[category] or category) end
+        end
+    else
+        for cat, bar in pairs(floatingBars) do self:Lock(cat) end
+    end
 end
 
-function PCD:Unlock()
-    for _, bar in pairs(floatingBars) do bar:EnableMouse(true) end
-    print("|cFF88CCFF[HexCD]|r Party CD bars unlocked. Drag to move.")
+function PCD:Unlock(category)
+    if category then
+        local bar = GetFloatingBar(category)  -- ensure bar exists
+        bar:EnableMouse(true)
+        bar._unlocked = true
+        bar:Show()
+        -- Show category label so user knows what they're positioning
+        if bar.title then
+            local label = FLOATING_TITLES[category] or category
+            bar.title:SetText(label .. "  |cFFFFCC00DRAG TO MOVE|r")
+        end
+        -- Set a minimum size so the bar is visible even with no data
+        if bar:GetHeight() < 30 then bar:SetHeight(30) end
+        bar:SetBackdropBorderColor(1.0, 0.8, 0.0, 0.9)
+    else
+        for cat, bar in pairs(floatingBars) do self:Unlock(cat) end
+    end
+end
+
+function PCD:IsUnlocked(category)
+    if category then
+        local bar = floatingBars[category]
+        return bar and bar._unlocked or false
+    end
+    for _, bar in pairs(floatingBars) do
+        if bar._unlocked then return true end
+    end
+    return false
+end
+
+function PCD:ToggleLock(category)
+    if self:IsUnlocked(category) then self:Lock(category) else self:Unlock(category) end
 end
 
 function PCD:GetMode()

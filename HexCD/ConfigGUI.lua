@@ -331,6 +331,57 @@ end
 -- Tab Content
 ------------------------------------------------------------------------
 
+------------------------------------------------------------------------
+-- Per-Tracker TTS/Alert Section (used by Kicks + Dispels panels)
+------------------------------------------------------------------------
+
+local function BuildTrackerAlertSection(scrollChild, trackerSlug, y)
+    local globalEnabled = Config:Get("hexcd_tts_enabled")
+    local dimSuffix = globalEnabled and "" or "  |cFF666666(TTS disabled globally)|r"
+
+    CreateSectionHeader(scrollChild, "Alerts" .. dimSuffix, y)
+    y = y - 25
+
+    local localKey = "hexcd_" .. trackerSlug .. "_ttsEnabled"
+    local localCb = CreateSettingsCheckbox(scrollChild, "TTS alert when your turn", localKey, y)
+    if not globalEnabled then localCb:Disable() end
+    y = y - 25
+
+    local alertBox = CreateSettingsEditBox(scrollChild, "Alert text:",
+        Config:Get("hexcd_" .. trackerSlug .. "_alertText") or "", 200, y)
+    y = y - 50
+
+    local voiceNames = { "" }
+    local voices = HexCD.Util and HexCD.Util.GetTTSVoices and HexCD.Util.GetTTSVoices() or {}
+    for _, v in ipairs(voices) do table.insert(voiceNames, v.name) end
+    CreateSettingsDropdown(scrollChild, "Voice override (empty = global)", "hexcd_" .. trackerSlug .. "_ttsVoice", voiceNames, y)
+    y = y - 55
+
+    CreateSettingsSlider(scrollChild, "Rate override (0 = global)", 0, 10, 1, "hexcd_" .. trackerSlug .. "_ttsRate", y)
+    y = y - 55
+
+    CreateSettingsSlider(scrollChild, "Volume override (0 = global)", 0, 100, 5, "hexcd_" .. trackerSlug .. "_ttsVolume", y)
+    y = y - 55
+
+    local saveBtn = CreateFrame("Button", nil, scrollChild, "UIPanelButtonTemplate")
+    saveBtn:SetSize(100, 24)
+    saveBtn:SetPoint("TOPLEFT", scrollChild, "TOPLEFT", 16, y)
+    saveBtn:SetText("Save & Test")
+    saveBtn:SetScript("OnClick", function()
+        Config:Set("hexcd_" .. trackerSlug .. "_alertText", alertBox._editBox:GetText())
+        if HexCD.Util and HexCD.Util.SpeakTTS and globalEnabled then
+            HexCD.Util.SpeakTTS(alertBox._editBox:GetText())
+        end
+    end)
+    y = y - 35
+
+    return y
+end
+
+------------------------------------------------------------------------
+-- Dispel Tab
+------------------------------------------------------------------------
+
 local function PopulateDispelTab(scrollChild)
     local DT = HexCD.DispelTracker
     if not DT then
@@ -345,13 +396,15 @@ local function PopulateDispelTab(scrollChild)
     y = y - 25
     CreateSettingsCheckbox(scrollChild, "Enable Dispel Tracker", "dispelEnabled", y)
     y = y - 30
-    CreateSettingsCheckbox(scrollChild, "Alert Sound (your turn)", "dispelAlertEnabled", y)
+    CreateAnchorToggle(scrollChild, "Dispel Tracker Position", "40CCCC", y,
+        function() return DT:IsUnlocked() end, function() DT:ToggleLock() end)
     y = y - 35
     CreateSettingsSlider(scrollChild, "Bar Width", 100, 400, 10, "dispelBarWidth", y)
     y = y - 55
     CreateSettingsSlider(scrollChild, "Bar Height", 14, 40, 2, "dispelBarHeight", y)
     y = y - 60
     y = CreateRotationControls(scrollChild, y, DT, "dispel", "SimulateDebuffs", "CC88FF")
+    y = BuildTrackerAlertSection(scrollChild, "dispels", y)
     scrollChild:SetHeight(math.max(1, math.abs(y) + 10))
 end
 
@@ -369,13 +422,15 @@ local function PopulateKickTab(scrollChild)
     y = y - 25
     CreateSettingsCheckbox(scrollChild, "Enable Kick Tracker", "kickEnabled", y)
     y = y - 30
-    CreateSettingsCheckbox(scrollChild, "Alert Sound (your turn)", "kickAlertEnabled", y)
+    CreateAnchorToggle(scrollChild, "Kick Tracker Position", "CC4040", y,
+        function() return KT:IsUnlocked() end, function() KT:ToggleLock() end)
     y = y - 35
     CreateSettingsSlider(scrollChild, "Bar Width", 100, 400, 10, "kickBarWidth", y)
     y = y - 55
     CreateSettingsSlider(scrollChild, "Bar Height", 14, 40, 2, "kickBarHeight", y)
     y = y - 60
     y = CreateRotationControls(scrollChild, y, KT, "kick", "SimulateKicks", "88CCFF")
+    y = BuildTrackerAlertSection(scrollChild, "kicks", y)
     scrollChild:SetHeight(math.max(1, math.abs(y) + 10))
 end
 
@@ -389,9 +444,8 @@ local function PopulatePartyCDTab(scrollChild)
     local y = 0
 
     -- ── Header + Test ──
-    CreateSectionHeader(scrollChild, "Personal CD Tracker", y)
+    CreateSectionHeader(scrollChild, "Personal Defensives", y)
 
-    -- Test / Clear button
     local testActive = false
     local testBtn = CreateFrame("Button", nil, scrollChild, "UIPanelButtonTemplate")
     testBtn:SetSize(80, 22)
@@ -416,248 +470,60 @@ local function PopulatePartyCDTab(scrollChild)
     CreateSectionHeader(scrollChild, "Position", y)
     y = y - 25
 
-    -- Anchor side dropdown
-    CreateSettingsDropdown(scrollChild, "Anchor To", "partyCDAnchorSide", {
+    CreateSettingsDropdown(scrollChild, "Anchor Side", "hexcd_personal_anchorSide", {
         "RIGHT", "LEFT", "TOP", "BOTTOM"
     }, y)
     y = y - 55
 
-    -- Offset X
-    CreateSettingsSlider(scrollChild, "Offset X", -50, 50, 1, "partyCDOfsX", y)
-    y = y - 55
-
-    -- Offset Y
-    CreateSettingsSlider(scrollChild, "Offset Y", -50, 50, 1, "partyCDOfsY", y)
-    y = y - 55
-
-    -- Growth direction
-    CreateSettingsDropdown(scrollChild, "Growth Direction", "partyCDGrowth", {
+    CreateSettingsDropdown(scrollChild, "Growth Direction", "hexcd_personal_growth", {
         "RIGHT", "LEFT", "DOWN", "UP"
     }, y)
     y = y - 55
 
-    -- ── Icons ──
-    CreateSectionHeader(scrollChild, "Icons", y)
+    CreateSettingsSlider(scrollChild, "Offset X", -100, 100, 1, "hexcd_personal_ofsX", y)
+    y = y - 55
+
+    CreateSettingsSlider(scrollChild, "Offset Y", -100, 100, 1, "hexcd_personal_ofsY", y)
+    y = y - 55
+
+    -- ── Layout ──
+    CreateSectionHeader(scrollChild, "Layout", y)
     y = y - 25
 
-    CreateSettingsSlider(scrollChild, "Icon Size", 16, 40, 1, "partyCDIconSize", y)
+    CreateSettingsSlider(scrollChild, "Icon Size", 16, 48, 1, "hexcd_personal_iconSize", y)
     y = y - 55
 
-    CreateSettingsSlider(scrollChild, "Icon Padding", 0, 10, 1, "partyCDIconPadding", y)
+    CreateSettingsSlider(scrollChild, "Icon Padding", 0, 10, 1, "hexcd_personal_iconPadding", y)
     y = y - 55
 
-    CreateSettingsSlider(scrollChild, "Ready Opacity", 0.2, 1.0, 0.1, "partyCDReadyAlpha", y)
+    CreateSettingsSlider(scrollChild, "Icons Per Row", 1, 10, 1, "hexcd_personal_maxIconsPerRow", y)
     y = y - 55
 
-    CreateSettingsSlider(scrollChild, "On-CD Opacity", 0.2, 1.0, 0.1, "partyCDActiveAlpha", y)
+    CreateSettingsSlider(scrollChild, "Max Rows", 1, 3, 1, "hexcd_personal_maxRows", y)
     y = y - 55
 
-    CreateSettingsSlider(scrollChild, "Swipe Opacity", 0.0, 1.0, 0.1, "partyCDSwipeAlpha", y)
-    y = y - 55
-
-    CreateSettingsCheckbox(scrollChild, "Desaturate On Cooldown", "partyCDDesaturate", y)
+    -- ── Appearance ──
+    CreateSectionHeader(scrollChild, "Appearance", y)
     y = y - 25
 
-    CreateSettingsCheckbox(scrollChild, "Show Ready Glow", "partyCDShowGlow", y)
+    CreateSettingsCheckbox(scrollChild, "Desaturate On Cooldown", "hexcd_personal_desaturate", y)
     y = y - 25
 
-    CreateSettingsCheckbox(scrollChild, "Show Cooldown Text", "partyCDShowText", y)
+    CreateSettingsCheckbox(scrollChild, "Show Cooldown Text", "hexcd_personal_showText", y)
+    y = y - 25
+
+    CreateSettingsCheckbox(scrollChild, "Show Ready Glow", "hexcd_personal_showGlow", y)
+    y = y - 25
+
+    CreateSettingsCheckbox(scrollChild, "Hide When Ready", "hexcd_personal_hideReady", y)
     y = y - 30
 
-    -- ── Tracker Sub-Tabs + Spell Lists ──
-    local DB = HexCD.SpellDB
-    local trackers = {
-        { category = "PERSONAL",      label = "Personal",  color = {1, 0.8, 0.25} },
-        { category = "PARTY_RANGED",  label = "Ranged",    color = {0.25, 0.8, 0.25} },
-        { category = "PARTY_STACKED", label = "Stacked",   color = {0.8, 0.53, 0.25} },
-        { category = "HEALING",       label = "Healing",   color = {0.25, 0.53, 0.8} },
-    }
+    CreateSettingsSlider(scrollChild, "Ready Opacity", 0.2, 1.0, 0.1, "hexcd_personal_readyAlpha", y)
+    y = y - 55
 
-    -- Class color map (WoW class colors)
-    local CLASS_COLORS = {
-        DEATHKNIGHT = "FFC41E3A", DEMONHUNTER = "FFA330C9", DRUID = "FFFF7C0A",
-        EVOKER = "FF33937F", HUNTER = "FFAAD372", MAGE = "FF3FC7EB",
-        MONK = "FF00FF98", PALADIN = "FFF48CBA", PRIEST = "FFFFFFFF",
-        ROGUE = "FFFFF468", SHAMAN = "FF0070DD", WARLOCK = "FF8788EE",
-        WARRIOR = "FFC69B6D",
-    }
+    CreateSettingsSlider(scrollChild, "On-CD Opacity", 0.2, 1.0, 0.1, "hexcd_personal_activeCDAlpha", y)
+    y = y - 55
 
-    -- Spell icon helper
-    local function GetIcon(spellID)
-        local icon = nil
-        pcall(function()
-            if C_Spell and C_Spell.GetSpellInfo then
-                local info = C_Spell.GetSpellInfo(spellID)
-                if info and info.iconID then icon = info.iconID end
-            end
-        end)
-        if not icon then
-            pcall(function()
-                if GetSpellTexture then icon = GetSpellTexture(spellID) end
-            end)
-        end
-        return icon or "Interface\\Icons\\INV_Misc_QuestionMark"
-    end
-
-    CreateSectionHeader(scrollChild, "Spell Filters", y)
-    y = y - 25
-
-    -- Sub-tab buttons
-    local activeSubTab = trackers[1].category
-    local spellContainer = CreateFrame("Frame", nil, scrollChild)
-    spellContainer:SetPoint("TOPLEFT", scrollChild, "TOPLEFT", 0, y - 28)
-    spellContainer:SetSize(560, 400)
-
-    local subTabBtns = {}
-    local subTabXOfs = 16
-    for i, t in ipairs(trackers) do
-        local btn = CreateFrame("Button", nil, scrollChild, "BackdropTemplate")
-        btn:SetSize(100, 22)
-        btn:SetPoint("TOPLEFT", scrollChild, "TOPLEFT", subTabXOfs, y)
-        btn:SetBackdrop({
-            bgFile = "Interface\\DialogFrame\\UI-DialogBox-Background",
-            edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border",
-            edgeSize = 8,
-            insets = { left = 2, right = 2, top = 2, bottom = 2 },
-        })
-        btn:EnableMouse(true)
-        btn:RegisterForClicks("AnyUp")
-        btn._label = btn:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-        btn._label:SetPoint("CENTER")
-        btn._label:SetText(t.label)
-        btn._category = t.category
-        btn._color = t.color
-        subTabBtns[i] = btn
-        subTabXOfs = subTabXOfs + 104
-    end
-
-    y = y - 28  -- space for sub-tab row
-
-    local function RefreshSpellList()
-        -- Clear old children
-        for _, child in ipairs({ spellContainer:GetChildren() }) do child:Hide(); child:SetParent(nil) end
-        for _, region in ipairs({ spellContainer:GetRegions() }) do region:Hide() end
-
-        -- Update sub-tab visuals
-        for _, btn in ipairs(subTabBtns) do
-            if btn._category == activeSubTab then
-                btn:SetBackdropColor(btn._color[1] * 0.3, btn._color[2] * 0.3, btn._color[3] * 0.3, 0.9)
-                btn:SetBackdropBorderColor(btn._color[1], btn._color[2], btn._color[3], 1)
-            else
-                btn:SetBackdropColor(0.08, 0.08, 0.12, 0.7)
-                btn:SetBackdropBorderColor(0.3, 0.3, 0.35, 0.5)
-            end
-        end
-
-        if not DB then return end
-
-        local spells = DB:GetByCategory(activeSubTab)
-        local sorted = {}
-        for id, info in pairs(spells) do
-            table.insert(sorted, { id = id, name = info.name, class = info.class, immune = info.immune })
-        end
-        table.sort(sorted, function(a, b)
-            if a.class ~= b.class then return a.class < b.class end
-            return a.name < b.name
-        end)
-
-        -- Enable All / Disable All buttons
-        local enableAllBtn = CreateFrame("Button", nil, spellContainer, "UIPanelButtonTemplate")
-        enableAllBtn:SetSize(75, 20)
-        enableAllBtn:SetPoint("TOPLEFT", spellContainer, "TOPLEFT", 16, 0)
-        enableAllBtn:SetText("All On")
-        enableAllBtn:SetScript("OnClick", function()
-            for _, spell in ipairs(sorted) do
-                Config:Set("partyCDSpell_" .. spell.id, true)
-            end
-            RefreshSpellList()
-        end)
-
-        local disableAllBtn = CreateFrame("Button", nil, spellContainer, "UIPanelButtonTemplate")
-        disableAllBtn:SetSize(75, 20)
-        disableAllBtn:SetPoint("LEFT", enableAllBtn, "RIGHT", 4, 0)
-        disableAllBtn:SetText("All Off")
-        disableAllBtn:SetScript("OnClick", function()
-            for _, spell in ipairs(sorted) do
-                Config:Set("partyCDSpell_" .. spell.id, false)
-            end
-            RefreshSpellList()
-        end)
-
-        local sy = -26
-        local lastClass = nil
-        local col = 0  -- 0 = left column, 1 = right column
-        local ROW_HEIGHT = 24
-        local COL_WIDTH = 260
-
-        for _, spell in ipairs(sorted) do
-            -- Class separator
-            if spell.class ~= lastClass then
-                if col == 1 then sy = sy - ROW_HEIGHT; col = 0 end  -- new row if mid-column
-                lastClass = spell.class
-                local classColor = CLASS_COLORS[spell.class] or "FFAAAAAA"
-                local className = spell.class:sub(1, 1) .. spell.class:sub(2):lower()
-                -- Normalize class names
-                if spell.class == "DEATHKNIGHT" then className = "Death Knight"
-                elseif spell.class == "DEMONHUNTER" then className = "Demon Hunter"
-                end
-
-                local header = spellContainer:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-                header:SetPoint("TOPLEFT", spellContainer, "TOPLEFT", 16, sy)
-                header:SetText("|c" .. classColor .. className .. "|r")
-                sy = sy - 18
-                col = 0
-            end
-
-            local configKey = "partyCDSpell_" .. spell.id
-            if Config:Get(configKey) == nil then Config:Set(configKey, true) end
-
-            local xOfs = 24 + col * COL_WIDTH
-
-            -- Checkbox
-            local cb = CreateFrame("CheckButton", nil, spellContainer, "InterfaceOptionsCheckButtonTemplate")
-            cb:SetPoint("TOPLEFT", spellContainer, "TOPLEFT", xOfs, sy)
-            cb:SetChecked(Config:Get(configKey) and true or false)
-            cb:SetScript("OnClick", function(self)
-                Config:Set(configKey, self:GetChecked() and true or false)
-            end)
-
-            -- Spell icon
-            local iconTex = spellContainer:CreateTexture(nil, "ARTWORK")
-            iconTex:SetSize(18, 18)
-            iconTex:SetPoint("LEFT", cb, "RIGHT", 0, 0)
-            iconTex:SetTexture(GetIcon(spell.id))
-            iconTex:SetTexCoord(0.08, 0.92, 0.08, 0.92)
-
-            -- Spell name
-            local label = spellContainer:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-            label:SetPoint("LEFT", iconTex, "RIGHT", 4, 0)
-            local classColor = CLASS_COLORS[spell.class] or "FFAAAAAA"
-            local suffix = spell.immune and " |cFFFF4444(immune)|r" or ""
-            label:SetText("|c" .. classColor .. spell.name .. "|r" .. suffix)
-
-            col = col + 1
-            if col >= 2 then
-                col = 0
-                sy = sy - ROW_HEIGHT
-            end
-        end
-        if col == 1 then sy = sy - ROW_HEIGHT end
-
-        spellContainer:SetHeight(math.max(1, math.abs(sy) + 10))
-    end
-
-    for _, btn in ipairs(subTabBtns) do
-        btn:SetScript("OnClick", function()
-            activeSubTab = btn._category
-            RefreshSpellList()
-        end)
-    end
-
-    RefreshSpellList()
-
-    -- Account for spellContainer height in scrollChild
-    y = y - 500  -- generous estimate; container handles its own height
     scrollChild:SetHeight(math.max(1, math.abs(y) + 10))
 end
 
@@ -688,58 +554,38 @@ local function CreateMainFrame()
     title:SetPoint("TOPLEFT", 14, -12)
     title:SetText("|cFF00CCFFHexCD|r")
 
-    local close = CreateFrame("Button", nil, f, "UIPanelCloseButton")
-    close:SetPoint("TOPRIGHT", -2, -2)
+    -- Non-secure close button (UIPanelCloseButton is secure and blocks during combat)
+    local close = CreateFrame("Button", nil, f)
+    close:SetSize(24, 24)
+    close:SetPoint("TOPRIGHT", -4, -4)
+    close:SetNormalTexture("Interface\\Buttons\\UI-Panel-MinimizeButton-Up")
+    close:SetPushedTexture("Interface\\Buttons\\UI-Panel-MinimizeButton-Down")
+    close:SetHighlightTexture("Interface\\Buttons\\UI-Panel-MinimizeButton-Highlight", "ADD")
+    close:SetScript("OnClick", function() f:Hide() end)
 
-    -- Anchor toggles header
-    local DT = HexCD.DispelTracker
-    local KT = HexCD.KickTracker
-    local anchorToggles = {}
-    local headerY = -40
-
-    local lockBtn = CreateFrame("Button", nil, f, "UIPanelButtonTemplate")
-    lockBtn:SetSize(80, 22)
-    lockBtn:SetPoint("TOPLEFT", 16, headerY)
-    lockBtn:SetText("|cFF00FF00Lock All|r")
-
-    local unlockBtn = CreateFrame("Button", nil, f, "UIPanelButtonTemplate")
-    unlockBtn:SetSize(90, 22)
-    unlockBtn:SetPoint("LEFT", lockBtn, "RIGHT", 4, 0)
-    unlockBtn:SetText("|cFFFFCC00Unlock All|r")
-
-    headerY = headerY - 28
-    if DT then
-        local t = CreateAnchorToggle(f, "Dispel Tracker", "CC88FF", headerY, function() return DT:IsUnlocked() end, function() DT:ToggleLock() end)
-        t:SetSize(270, 26)
-        anchorToggles[#anchorToggles+1] = t
-    end
-    if KT then
-        local t = CreateAnchorToggle(f, "Kick Tracker", "88CCFF", headerY, function() return KT:IsUnlocked() end, function() KT:ToggleLock() end)
-        t:ClearAllPoints()
-        t:SetSize(270, 26)
-        t:SetPoint("TOPLEFT", f, "TOPLEFT", 300, headerY)
-        anchorToggles[#anchorToggles+1] = t
-    end
-
-    lockBtn:SetScript("OnClick", function()
-        if DT and DT:IsUnlocked() then DT:Lock() end
-        if KT and KT:IsUnlocked() then KT:Lock() end
-        for _, t in ipairs(anchorToggles) do t._update() end
+    -- Escape to close (works during combat — non-secure)
+    f:SetScript("OnKeyDown", function(self, key)
+        if key == "ESCAPE" then
+            self:SetPropagateKeyboardInput(false)
+            self:Hide()
+        else
+            self:SetPropagateKeyboardInput(true)
+        end
     end)
-    unlockBtn:SetScript("OnClick", function()
-        if DT and not DT:IsUnlocked() then DT:Unlock() end
-        if KT and not KT:IsUnlocked() then KT:Unlock() end
-        for _, t in ipairs(anchorToggles) do t._update() end
-    end)
+    f:EnableKeyboard(true)
 
-    headerY = headerY - 32
+    -- Header spacing (lock/unlock moved into per-tracker panels)
+    local headerY = -38
 
-    -- Tab buttons
-    local activeTab = "dispel"
+    -- ================================================================
+    -- TOP-LEVEL TABS: Trackers | Spell Filters | Settings
+    -- ================================================================
+    local activeTopTab = "trackers"
+    local activeTracker = "personal"  -- sidebar selection within Trackers tab
 
-    local function CreateTab(label, tabKey, xOff)
+    local function CreateTopTab(label, tabKey, xOff)
         local btn = CreateFrame("Button", nil, f, "BackdropTemplate")
-        btn:SetSize(110, 24)
+        btn:SetSize(140, 24)
         btn:SetPoint("TOPLEFT", f, "TOPLEFT", xOff, headerY)
         btn:SetBackdrop({
             bgFile = "Interface\\DialogFrame\\UI-DialogBox-Background",
@@ -756,23 +602,21 @@ local function CreateMainFrame()
         return btn
     end
 
-    local dispelTabBtn = CreateTab("|cFFCC88FFDispel|r", "dispel", 16)
-    local kickTabBtn = CreateTab("|cFF88CCFFKick|r", "kick", 130)
-    local partyCDTabBtn = CreateTab("|cFF88FFCCPersonal CD|r", "partycd", 244)
-    local settingsTabBtn = CreateTab("|cFFAAAAAASettings|r", "settings", 358)
+    local trackersTabBtn = CreateTopTab("|cFF88FFCCTrackers|r", "trackers", 16)
+    local filtersTabBtn = CreateTopTab("|cFFFFCC88Spell Filters|r", "filters", 170)
+    local settingsTabBtn = CreateTopTab("|cFFAAAAAASettings|r", "settings", 330)
 
-    local tabBtns = { dispelTabBtn, kickTabBtn, partyCDTabBtn, settingsTabBtn }
-    local tabColors = {
-        dispel = { active = {0.15, 0.05, 0.2, 0.9}, border = {0.8, 0.5, 1.0, 1.0}, label = "|cFFCC88FFDispel|r", dim = "|cFF888888Dispel|r" },
-        kick = { active = {0.05, 0.1, 0.2, 0.9}, border = {0.5, 0.8, 1.0, 1.0}, label = "|cFF88CCFFKick|r", dim = "|cFF888888Kick|r" },
-        partycd = { active = {0.05, 0.15, 0.1, 0.9}, border = {0.5, 1.0, 0.8, 1.0}, label = "|cFF88FFCCPersonal CD|r", dim = "|cFF888888Personal CD|r" },
+    local topTabBtns = { trackersTabBtn, filtersTabBtn, settingsTabBtn }
+    local topTabColors = {
+        trackers = { active = {0.05, 0.15, 0.1, 0.9}, border = {0.5, 1.0, 0.8, 1.0}, label = "|cFF88FFCCTrackers|r", dim = "|cFF888888Trackers|r" },
+        filters  = { active = {0.15, 0.1, 0.05, 0.9}, border = {1.0, 0.8, 0.5, 1.0}, label = "|cFFFFCC88Spell Filters|r", dim = "|cFF888888Spell Filters|r" },
         settings = { active = {0.1, 0.1, 0.1, 0.9}, border = {0.6, 0.6, 0.6, 1.0}, label = "|cFFAAAAAASettings|r", dim = "|cFF888888Settings|r" },
     }
 
-    local function UpdateTabVisuals()
-        for _, btn in ipairs(tabBtns) do
-            local c = tabColors[btn._tabKey]
-            if btn._tabKey == activeTab then
+    local function UpdateTopTabVisuals()
+        for _, btn in ipairs(topTabBtns) do
+            local c = topTabColors[btn._tabKey]
+            if btn._tabKey == activeTopTab then
                 btn:SetBackdropColor(unpack(c.active))
                 btn:SetBackdropBorderColor(unpack(c.border))
                 btn._label:SetText(c.label)
@@ -786,96 +630,443 @@ local function CreateMainFrame()
 
     headerY = headerY - 30
 
-    -- Scroll frame
+    -- ================================================================
+    -- SIDEBAR (visible only on Trackers + Spell Filters tabs)
+    -- ================================================================
+    local SIDEBAR_WIDTH = 90
+    local SIDEBAR_TRACKERS = {
+        { key = "personal",  label = "Personal Def", color = {1, 0.8, 0.25} },
+        { key = "external",  label = "External Def", color = {0.25, 0.8, 0.25} },
+        { key = "utility",   label = "Utility",     color = {0.53, 0.67, 0.8} },
+        { key = "healing",   label = "Healing",     color = {0.25, 0.53, 0.8} },
+        { key = "kicks",     label = "Kicks",       color = {0.8, 0.25, 0.25} },
+        { key = "cc",        label = "CC",           color = {0.8, 0.25, 0.8} },
+        { key = "dispels",   label = "Dispels",     color = {0.25, 0.8, 0.8} },
+    }
+
+    -- Map sidebar key → SpellDB category
+    local SIDEBAR_TO_CATEGORY = {
+        personal = "PERSONAL", external = "EXTERNAL_DEFENSIVE",
+        utility = "UTILITY", healing = "HEALING", kicks = "KICK",
+        cc = "CC", dispels = "DISPEL",
+    }
+
+    local sidebarFrame = CreateFrame("Frame", nil, f)
+    sidebarFrame:SetPoint("TOPLEFT", f, "TOPLEFT", 10, headerY)
+    sidebarFrame:SetSize(SIDEBAR_WIDTH, 400)
+    local sidebarBtns = {}
+
+    for i, info in ipairs(SIDEBAR_TRACKERS) do
+        local btn = CreateFrame("Button", nil, sidebarFrame, "BackdropTemplate")
+        btn:SetSize(SIDEBAR_WIDTH - 4, 22)
+        btn:SetPoint("TOPLEFT", sidebarFrame, "TOPLEFT", 0, -(i - 1) * 24)
+        btn:SetBackdrop({
+            bgFile = "Interface\\DialogFrame\\UI-DialogBox-Background",
+            edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border",
+            edgeSize = 8,
+            insets = { left = 2, right = 2, top = 2, bottom = 2 },
+        })
+        btn:EnableMouse(true)
+        btn:RegisterForClicks("AnyUp")
+        btn._label = btn:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+        btn._label:SetPoint("LEFT", 6, 0)
+        btn._label:SetText(info.label)
+        btn._key = info.key
+        btn._color = info.color
+
+        -- Accent bar on left edge
+        local accent = btn:CreateTexture(nil, "OVERLAY")
+        accent:SetWidth(2)
+        accent:SetPoint("TOPLEFT", btn, "TOPLEFT", 0, 0)
+        accent:SetPoint("BOTTOMLEFT", btn, "BOTTOMLEFT", 0, 0)
+        btn._accent = accent
+
+        sidebarBtns[#sidebarBtns + 1] = btn
+    end
+
+    -- Lock All / Unlock All buttons below sidebar
+    local sidebarBottomY = -(#SIDEBAR_TRACKERS) * 24 - 10
+    local unlockAllBtn = CreateFrame("Button", nil, sidebarFrame, "BackdropTemplate")
+    unlockAllBtn:SetSize(SIDEBAR_WIDTH - 4, 20)
+    unlockAllBtn:SetPoint("TOPLEFT", sidebarFrame, "TOPLEFT", 0, sidebarBottomY)
+    unlockAllBtn:SetBackdrop({
+        bgFile = "Interface\\DialogFrame\\UI-DialogBox-Background",
+        edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border",
+        edgeSize = 8,
+        insets = { left = 2, right = 2, top = 2, bottom = 2 },
+    })
+    unlockAllBtn:SetBackdropColor(0.15, 0.12, 0.02, 0.9)
+    unlockAllBtn:SetBackdropBorderColor(1.0, 0.8, 0.0, 0.7)
+    unlockAllBtn:EnableMouse(true)
+    unlockAllBtn:RegisterForClicks("AnyUp")
+    local unlockLbl = unlockAllBtn:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    unlockLbl:SetPoint("CENTER")
+    unlockLbl:SetText("|cFFFFCC00Unlock All|r")
+    unlockAllBtn:SetScript("OnClick", function()
+        local DT = HexCD.DispelTracker
+        local KT = HexCD.KickTracker
+        local PCD = HexCD.PartyCDDisplay
+        if DT then DT:Unlock() end
+        if KT then KT:Unlock() end
+        if PCD then PCD:Unlock() end
+    end)
+
+    local lockAllBtn = CreateFrame("Button", nil, sidebarFrame, "BackdropTemplate")
+    lockAllBtn:SetSize(SIDEBAR_WIDTH - 4, 20)
+    lockAllBtn:SetPoint("TOPLEFT", sidebarFrame, "TOPLEFT", 0, sidebarBottomY - 22)
+    lockAllBtn:SetBackdrop({
+        bgFile = "Interface\\DialogFrame\\UI-DialogBox-Background",
+        edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border",
+        edgeSize = 8,
+        insets = { left = 2, right = 2, top = 2, bottom = 2 },
+    })
+    lockAllBtn:SetBackdropColor(0.08, 0.08, 0.12, 0.9)
+    lockAllBtn:SetBackdropBorderColor(0.3, 0.3, 0.35, 0.7)
+    lockAllBtn:EnableMouse(true)
+    lockAllBtn:RegisterForClicks("AnyUp")
+    local lockLbl = lockAllBtn:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    lockLbl:SetPoint("CENTER")
+    lockLbl:SetText("|cFF888888Lock All|r")
+    lockAllBtn:SetScript("OnClick", function()
+        local DT = HexCD.DispelTracker
+        local KT = HexCD.KickTracker
+        local PCD = HexCD.PartyCDDisplay
+        if DT then DT:Lock() end
+        if KT then KT:Lock() end
+        if PCD then PCD:Lock() end
+    end)
+
+    local function UpdateSidebarVisuals()
+        for _, btn in ipairs(sidebarBtns) do
+            if btn._key == activeTracker then
+                btn:SetBackdropColor(0.15, 0.15, 0.15, 0.9)
+                btn:SetBackdropBorderColor(btn._color[1], btn._color[2], btn._color[3], 0.8)
+                btn._accent:SetColorTexture(btn._color[1], btn._color[2], btn._color[3], 1)
+                btn._label:SetTextColor(btn._color[1], btn._color[2], btn._color[3])
+            else
+                btn:SetBackdropColor(0.06, 0.06, 0.08, 0.7)
+                btn:SetBackdropBorderColor(0.2, 0.2, 0.25, 0.5)
+                btn._accent:SetColorTexture(0, 0, 0, 0)
+                btn._label:SetTextColor(0.5, 0.5, 0.5)
+            end
+        end
+    end
+
+    -- ================================================================
+    -- CONTENT AREA (right of sidebar, or full width for Settings)
+    -- ================================================================
     local scrollFrame = CreateFrame("ScrollFrame", nil, f, "UIPanelScrollFrameTemplate")
-    scrollFrame:SetPoint("TOPLEFT", 10, headerY)
-    scrollFrame:SetPoint("BOTTOMRIGHT", -30, 10)
     local scrollChild = CreateFrame("Frame", nil, scrollFrame)
-    scrollChild:SetWidth(scrollFrame:GetWidth() - 20)
-    scrollChild:SetHeight(1)
-    scrollFrame:SetScrollChild(scrollChild)
     f._scrollChild = scrollChild
     f._scrollFrame = scrollFrame
 
-    local function RefreshContent()
+    local function PositionScrollFrame(hasSidebar)
+        scrollFrame:ClearAllPoints()
+        if hasSidebar then
+            scrollFrame:SetPoint("TOPLEFT", f, "TOPLEFT", 10 + SIDEBAR_WIDTH + 4, headerY)
+        else
+            scrollFrame:SetPoint("TOPLEFT", f, "TOPLEFT", 10, headerY)
+        end
+        scrollFrame:SetPoint("BOTTOMRIGHT", f, "BOTTOMRIGHT", -30, 10)
+        scrollChild:SetWidth(scrollFrame:GetWidth() - 20)
+        scrollChild:SetHeight(1)
+        scrollFrame:SetScrollChild(scrollChild)
+    end
+
+    -- ================================================================
+    -- POPULATE FUNCTIONS
+    -- ================================================================
+
+    local function PopulateTrackerContent(scrollChild)
+        -- Clear
         for _, child in ipairs({ scrollChild:GetChildren() }) do child:Hide(); child:SetParent(nil) end
         for _, region in ipairs({ scrollChild:GetRegions() }) do region:Hide() end
 
-        if activeTab == "dispel" then
-            PopulateDispelTab(scrollChild)
-        elseif activeTab == "kick" then
-            PopulateKickTab(scrollChild)
-        elseif activeTab == "partycd" then
+        -- Map tracker key to panel type
+        local panelC = { kicks = true, dispels = true }  -- rotation overlay trackers
+
+        if activeTracker == "personal" then
+            -- For now, reuse existing PopulatePartyCDTab which handles Personal settings
             PopulatePartyCDTab(scrollChild)
-        elseif activeTab == "settings" then
+        elseif panelC[activeTracker] then
+            -- Rotation overlay trackers (Kicks, Dispels)
+            if activeTracker == "kicks" then
+                PopulateKickTab(scrollChild)
+            else
+                PopulateDispelTab(scrollChild)
+            end
+        else
+            -- Floating bar trackers (Panel B)
+            local info = nil
+            for _, s in ipairs(SIDEBAR_TRACKERS) do
+                if s.key == activeTracker then info = s; break end
+            end
+            local label = info and info.label or activeTracker
+            local category = SIDEBAR_TO_CATEGORY[activeTracker] or "PERSONAL"
+            local slug = activeTracker  -- config key prefix: hexcd_{slug}_*
+            local PCD = HexCD.PartyCDDisplay
+
             local y = 0
-
-            -- TTS Settings
-            CreateSectionHeader(scrollChild, "TTS (Text-to-Speech)", y)
+            CreateSectionHeader(scrollChild, label, y)
             y = y - 25
 
-            -- Voice dropdown
-            local voiceNames = { "" }  -- empty = auto-detect
-            local voices = HexCD.Util and HexCD.Util.GetTTSVoices and HexCD.Util.GetTTSVoices() or {}
-            for _, v in ipairs(voices) do
-                table.insert(voiceNames, v.name)
-            end
-            CreateSettingsDropdown(scrollChild, "TTS Voice (empty = auto)", "ttsVoiceName", voiceNames, y)
-            y = y - 55
-
-            CreateSettingsSlider(scrollChild, "Speech Rate", 1, 10, 1, "ttsRate", y)
-            y = y - 55
-
-            CreateSettingsSlider(scrollChild, "Volume", 0, 100, 5, "ttsVolume", y)
-            y = y - 55
-
-            -- Alert text config
-            CreateSectionHeader(scrollChild, "Alert Text", y)
-            y = y - 25
-
-            local dispelBox = CreateSettingsEditBox(scrollChild, "Dispel alert:", Config:Get("dispelAlertText") or "Dispel", 200, y)
-            y = y - 50
-
-            local kickBox = CreateSettingsEditBox(scrollChild, "Kick alert:", Config:Get("kickAlertText") or "Kick", 200, y)
-            y = y - 50
-
-            local function MakeBtn(label, width, xOff, onClick)
-                local btn = CreateFrame("Button", nil, scrollChild, "UIPanelButtonTemplate")
-                btn:SetSize(width, 24)
-                btn:SetPoint("TOPLEFT", scrollChild, "TOPLEFT", xOff, y)
-                btn:SetText(label)
-                btn:SetScript("OnClick", onClick)
-                return btn
+            -- Lock/Unlock (color matches sidebar)
+            if PCD then
+                local c = info and info.color or {0.25, 0.8, 0.25}
+                local colorHex = string.format("%02x%02x%02x", c[1]*255, c[2]*255, c[3]*255)
+                CreateAnchorToggle(scrollChild, label .. " Position", colorHex, y,
+                    function() return PCD:IsUnlocked(category) end,
+                    function() PCD:ToggleLock(category) end)
+                y = y - 35
             end
 
-            MakeBtn("Save & Test", 100, 16, function()
-                Config:Set("dispelAlertText", dispelBox._editBox:GetText())
-                Config:Set("kickAlertText", kickBox._editBox:GetText())
-                if HexCD.Util and HexCD.Util.SpeakTTS then
-                    HexCD.Util.SpeakTTS(dispelBox._editBox:GetText())
-                end
-            end)
-            y = y - 35
-
-            -- Debug
-            CreateSectionHeader(scrollChild, "Debug", y)
+            -- Layout
+            CreateSectionHeader(scrollChild, "Layout", y)
             y = y - 25
-            CreateSettingsDropdown(scrollChild, "Log Level", "logLevel", { "OFF", "ERRORS", "INFO", "DEBUG", "TRACE" }, y)
-            y = y - 65
+
+            CreateSettingsSlider(scrollChild, "Icon Size", 16, 48, 1, "hexcd_" .. slug .. "_iconSize", y)
+            y = y - 55
+
+            CreateSettingsSlider(scrollChild, "Icon Padding", 0, 10, 1, "hexcd_" .. slug .. "_iconPadding", y)
+            y = y - 55
+
+            CreateSettingsSlider(scrollChild, "Max Icons Per Player", 1, 10, 1, "hexcd_" .. slug .. "_maxIcons", y)
+            y = y - 55
+
+            CreateSettingsSlider(scrollChild, "Name Width", 30, 120, 5, "hexcd_" .. slug .. "_nameWidth", y)
+            y = y - 55
+
+            CreateSettingsCheckbox(scrollChild, "Hide Bar Title", "hexcd_" .. slug .. "_hideTitle", y)
+            y = y - 30
+
+            -- Appearance
+            CreateSectionHeader(scrollChild, "Appearance", y)
+            y = y - 25
+
+            CreateSettingsCheckbox(scrollChild, "Desaturate On Cooldown", "hexcd_" .. slug .. "_desaturate", y)
+            y = y - 25
+
+            CreateSettingsCheckbox(scrollChild, "Show Cooldown Text", "hexcd_" .. slug .. "_showText", y)
+            y = y - 25
+
+            CreateSettingsCheckbox(scrollChild, "Show Tooltips", "hexcd_" .. slug .. "_showTooltips", y)
+            y = y - 25
+
+            CreateSettingsCheckbox(scrollChild, "Hide When Ready", "hexcd_" .. slug .. "_hideReady", y)
+            y = y - 30
+
+            CreateSettingsSlider(scrollChild, "Bar Opacity", 0.0, 1.0, 0.05, "hexcd_" .. slug .. "_barAlpha", y)
+            y = y - 55
+
             scrollChild:SetHeight(math.max(1, math.abs(y) + 10))
         end
-        UpdateTabVisuals()
     end
 
-    for _, btn in ipairs(tabBtns) do
+    local function PopulateSpellFiltersContent(scrollChild)
+        -- Clear
+        for _, child in ipairs({ scrollChild:GetChildren() }) do child:Hide(); child:SetParent(nil) end
+        for _, region in ipairs({ scrollChild:GetRegions() }) do region:Hide() end
+
+        -- Reuse existing spell filter from PopulatePartyCDTab's sub-tab system
+        -- but scoped to the selected sidebar category
+        local category = SIDEBAR_TO_CATEGORY[activeTracker]
+        if not category then category = "PERSONAL" end
+
+        local DB = HexCD.SpellDB
+        local y = 0
+        CreateSectionHeader(scrollChild, (DB.CATEGORY_LABELS and DB.CATEGORY_LABELS[category]) or category, y)
+        y = y - 25
+
+        -- Class color map
+        local CLASS_COLORS = {
+            DEATHKNIGHT = {0.77, 0.12, 0.23}, DEMONHUNTER = {0.64, 0.19, 0.79},
+            DRUID = {1, 0.49, 0.04}, EVOKER = {0.2, 0.58, 0.5},
+            HUNTER = {0.67, 0.83, 0.45}, MAGE = {0.25, 0.78, 0.92},
+            MONK = {0, 1, 0.6}, PALADIN = {0.96, 0.55, 0.73},
+            PRIEST = {1, 1, 1}, ROGUE = {1, 0.96, 0.41},
+            SHAMAN = {0, 0.44, 0.87}, WARLOCK = {0.53, 0.53, 0.93},
+            WARRIOR = {0.78, 0.61, 0.43},
+        }
+        local CLASS_ORDER = {
+            "DEATHKNIGHT", "DEMONHUNTER", "DRUID", "EVOKER", "HUNTER",
+            "MAGE", "MONK", "PALADIN", "PRIEST", "ROGUE",
+            "SHAMAN", "WARLOCK", "WARRIOR",
+        }
+        local CLASS_NAMES = {
+            DEATHKNIGHT = "Death Knight", DEMONHUNTER = "Demon Hunter", DRUID = "Druid",
+            EVOKER = "Evoker", HUNTER = "Hunter", MAGE = "Mage", MONK = "Monk",
+            PALADIN = "Paladin", PRIEST = "Priest", ROGUE = "Rogue",
+            SHAMAN = "Shaman", WARLOCK = "Warlock", WARRIOR = "Warrior",
+        }
+
+        local spells = DB and DB:GetByCategory(category) or {}
+        -- Collect all IDs for Enable/Disable All
+        local allIDs = {}
+        local byClass = {}
+        for id, info in pairs(spells) do
+            allIDs[#allIDs + 1] = id
+            byClass[info.class] = byClass[info.class] or {}
+            table.insert(byClass[info.class], { id = id, info = info })
+        end
+
+        -- Enable All / Disable All buttons
+        local enableBtn = CreateFrame("Button", nil, scrollChild, "UIPanelButtonTemplate")
+        enableBtn:SetSize(80, 20)
+        enableBtn:SetPoint("TOPLEFT", scrollChild, "TOPLEFT", 16, y)
+        enableBtn:SetText("Enable All")
+        enableBtn:SetScript("OnClick", function()
+            for _, sid in ipairs(allIDs) do Config:Set("partyCDSpell_" .. sid, true) end
+            PopulateSpellFiltersContent(scrollChild)
+        end)
+
+        local disableBtn = CreateFrame("Button", nil, scrollChild, "UIPanelButtonTemplate")
+        disableBtn:SetSize(80, 20)
+        disableBtn:SetPoint("LEFT", enableBtn, "RIGHT", 6, 0)
+        disableBtn:SetText("Disable All")
+        disableBtn:SetScript("OnClick", function()
+            for _, sid in ipairs(allIDs) do Config:Set("partyCDSpell_" .. sid, false) end
+            PopulateSpellFiltersContent(scrollChild)
+        end)
+        y = y - 28
+
+        -- Render class groups
+        for _, cls in ipairs(CLASS_ORDER) do
+            local group = byClass[cls]
+            if group and #group > 0 then
+                table.sort(group, function(a, b) return a.info.name < b.info.name end)
+                local cc = CLASS_COLORS[cls] or {0.7, 0.7, 0.7}
+                local clsLabel = scrollChild:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+                clsLabel:SetPoint("TOPLEFT", 16, y)
+                clsLabel:SetText(string.format("|cFF%02x%02x%02x%s|r", cc[1]*255, cc[2]*255, cc[3]*255, CLASS_NAMES[cls] or cls))
+                y = y - 18
+
+                local col = 0
+                for _, spell in ipairs(group) do
+                    local configKey = "partyCDSpell_" .. spell.id
+                    local xOff = col == 0 and 24 or 290
+                    local cb = CreateSettingsCheckbox(scrollChild, spell.info.name, configKey, y)
+                    cb:ClearAllPoints()
+                    cb:SetPoint("TOPLEFT", scrollChild, "TOPLEFT", xOff + 20, y)
+                    cb:SetChecked(Config:Get(configKey) ~= false)
+                    cb:SetScript("OnClick", function(self)
+                        Config:Set(configKey, self:GetChecked() and true or false)
+                    end)
+                    -- Spell icon
+                    local icon = scrollChild:CreateTexture(nil, "ARTWORK")
+                    icon:SetSize(16, 16)
+                    icon:SetPoint("RIGHT", cb, "LEFT", -2, 0)
+                    icon:SetTexCoord(0.08, 0.92, 0.08, 0.92)
+                    pcall(function()
+                        local tex = nil
+                        if C_Spell and C_Spell.GetSpellTexture then
+                            tex = C_Spell.GetSpellTexture(spell.id)
+                        elseif GetSpellTexture then
+                            tex = GetSpellTexture(spell.id)
+                        end
+                        icon:SetTexture(tex or "Interface\\Icons\\INV_Misc_QuestionMark")
+                    end)
+                    col = col + 1
+                    if col >= 2 then col = 0; y = y - 22 end
+                end
+                if col ~= 0 then y = y - 22 end
+                y = y - 6
+            end
+        end
+
+        scrollChild:SetHeight(math.max(1, math.abs(y) + 10))
+    end
+
+    local function PopulateSettingsContent(scrollChild)
+        -- Clear
+        for _, child in ipairs({ scrollChild:GetChildren() }) do child:Hide(); child:SetParent(nil) end
+        for _, region in ipairs({ scrollChild:GetRegions() }) do region:Hide() end
+
+        local y = 0
+
+        -- Detection Layers
+        CreateSectionHeader(scrollChild, "Detection Layers", y)
+        y = y - 25
+        CreateSettingsCheckbox(scrollChild, "Aura Detection (UNIT_AURA + evidence)", "hexcd_layer_aura", y)
+        y = y - 22
+        CreateSettingsCheckbox(scrollChild, "Direct SpellID (UNIT_SPELLCAST_SUCCEEDED)", "hexcd_layer_direct", y)
+        y = y - 22
+        CreateSettingsCheckbox(scrollChild, "Taint Laundering (StatusBar unwrap)", "hexcd_layer_launder", y)
+        y = y - 22
+        CreateSettingsCheckbox(scrollChild, "Addon Comms (CDCAST sync)", "hexcd_layer_comms", y)
+        y = y - 30
+
+        -- TTS Global Settings
+        CreateSectionHeader(scrollChild, "TTS (Text-to-Speech) — Global", y)
+        y = y - 25
+
+        CreateSettingsCheckbox(scrollChild, "Enable TTS alerts (master toggle)", "hexcd_tts_enabled", y)
+        y = y - 25
+
+        local note = scrollChild:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
+        note:SetPoint("TOPLEFT", 40, y)
+        note:SetText("|cFF888888Per-tracker alert text and voice overrides are in each tracker's settings.|r")
+        y = y - 20
+
+        -- Default voice/rate/volume
+        local voiceNames = { "" }
+        local voices = HexCD.Util and HexCD.Util.GetTTSVoices and HexCD.Util.GetTTSVoices() or {}
+        for _, v in ipairs(voices) do table.insert(voiceNames, v.name) end
+        CreateSettingsDropdown(scrollChild, "Default Voice (empty = auto)", "ttsVoiceName", voiceNames, y)
+        y = y - 55
+        CreateSettingsSlider(scrollChild, "Default Rate", 1, 10, 1, "ttsRate", y)
+        y = y - 55
+        CreateSettingsSlider(scrollChild, "Default Volume", 0, 100, 5, "ttsVolume", y)
+        y = y - 55
+
+        -- Debug
+        CreateSectionHeader(scrollChild, "Debug", y)
+        y = y - 25
+        CreateSettingsDropdown(scrollChild, "Log Level", "logLevel", { "OFF", "ERRORS", "INFO", "DEBUG", "TRACE" }, y)
+        y = y - 55
+        CreateSettingsCheckbox(scrollChild, "Auto-open log after encounters", "autoOpenLog", y)
+        y = y - 30
+
+        scrollChild:SetHeight(math.max(1, math.abs(y) + 10))
+    end
+
+    -- ================================================================
+    -- REFRESH: wire everything together
+    -- ================================================================
+
+    local function RefreshContent()
+        local hasSidebar = (activeTopTab == "trackers" or activeTopTab == "filters")
+        sidebarFrame:SetShown(hasSidebar)
+        PositionScrollFrame(hasSidebar)
+
+        if activeTopTab == "trackers" then
+            PopulateTrackerContent(scrollChild)
+        elseif activeTopTab == "filters" then
+            PopulateSpellFiltersContent(scrollChild)
+        elseif activeTopTab == "settings" then
+            PopulateSettingsContent(scrollChild)
+        end
+
+        UpdateTopTabVisuals()
+        UpdateSidebarVisuals()
+    end
+
+    for _, btn in ipairs(topTabBtns) do
         btn:SetScript("OnClick", function()
-            activeTab = btn._tabKey
+            activeTopTab = btn._tabKey
+            RefreshContent()
+        end)
+    end
+
+    for _, btn in ipairs(sidebarBtns) do
+        btn:SetScript("OnClick", function()
+            activeTracker = btn._key
             RefreshContent()
         end)
     end
 
     f._refresh = RefreshContent
-    UpdateTabVisuals()
+    UpdateTopTabVisuals()
+    UpdateSidebarVisuals()
     return f
 end
 

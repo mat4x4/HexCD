@@ -41,6 +41,8 @@ end
 ---@param level string "ERRORS"|"INFO"|"DEBUG"|"TRACE"
 ---@param msg string
 function Log:Log(level, msg)
+    -- Guard: reject secret/tainted values to prevent export crashes
+    if issecretvalue and (issecretvalue(msg) or issecretvalue(level)) then return end
     local numLevel = LOG_LEVELS[level] or 0
     if numLevel > getLogLevel() then return end
 
@@ -440,10 +442,15 @@ function Log:Export()
     local lines = {}
     local allEntries = self:GetEntries()
     for _, e in ipairs(allEntries) do
-        local timeStr = e.fightRelativeSec
-            and string.format("[%s]", HexCD.Util.FormatTime(e.fightRelativeSec))
-            or "[--:--]"
-        table.insert(lines, string.format("%s %s: %s", timeStr, e.level, e.message))
+        -- Skip entries with secret/tainted values (Midnight taint can leak into log messages)
+        if issecretvalue and (issecretvalue(e.message) or issecretvalue(e.level)) then
+            table.insert(lines, "[--:--] DEBUG: (secret value — skipped)")
+        else
+            local timeStr = e.fightRelativeSec
+                and string.format("[%s]", HexCD.Util.FormatTime(e.fightRelativeSec))
+                or "[--:--]"
+            table.insert(lines, string.format("%s %s: %s", timeStr, e.level, e.message))
+        end
     end
     return table.concat(lines, "\n")
 end

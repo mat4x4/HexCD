@@ -4,7 +4,7 @@
 HexCD = HexCD or {}
 
 local ADDON_NAME = "HexCD"
-local VERSION = "1.4.2"
+local VERSION = "1.5.0"
 
 local Config = HexCD.Config
 local Log = HexCD.DebugLog
@@ -25,6 +25,7 @@ local function OnEvent(self, event, ...)
             if HexCD.DispelTracker then HexCD.DispelTracker:Init() end
             if HexCD.KickTracker then HexCD.KickTracker:Init() end
             if HexCD.CommSync then HexCD.CommSync:Init() end
+            if HexCD.AuraDetector then HexCD.AuraDetector:Init() end
             if HexCD.PartyCDDisplay then HexCD.PartyCDDisplay:Init() end
             Log:Log("INFO", string.format("HexCD v%s loaded. Type /hexcd for commands.", VERSION))
             print(string.format("|cFF00CCFF[HexCD]|r v%s loaded. Type |cFFFFCC00/hexcd|r for commands.", VERSION))

@@ -41,7 +41,8 @@ end
 local DISPELLER_BAR_POOL_SIZE = 6
 local DEBUFF_ENTRY_POOL_SIZE = 8
 local INACTIVE_FADE_SEC = 3
-local ALERT_DEBOUNCE_SEC = 2
+local ALERT_DEBOUNCE_SEC = 3   -- min seconds between any TTS alert
+local alertedForCurrentDebuffs = false  -- true = already alerted, don't repeat until we dispel
 local UPDATE_THROTTLE = 0.2
 local ADDON_MSG_PREFIX = "HexCD"
 local commsRegistered = false
@@ -604,6 +605,35 @@ end
 -- Alert Sound
 ------------------------------------------------------------------------
 
+--- Check if any party member has a dispellable debuff.
+--- Tries C_UnitAuras HARMFUL|RAID first, falls back to iterating HARMFUL auras.
+local function AnyDispellableDebuff()
+    local units = { "party1", "party2", "party3", "party4", "player" }
+    for _, uid in ipairs(units) do
+        if UnitExists(uid) and not UnitIsDeadOrGhost(uid) then
+            -- Approach 1: C_UnitAuras.GetUnitAuras (Midnight API)
+            if C_UnitAuras and C_UnitAuras.GetUnitAuras then
+                local ok, auras = pcall(C_UnitAuras.GetUnitAuras, uid, "HARMFUL|RAID")
+                if ok and auras and #auras > 0 then
+                    return true, uid
+                end
+            end
+            -- Approach 2: old AuraUtil / UnitAura iteration
+            if AuraUtil and AuraUtil.ForEachAura then
+                local found = false
+                pcall(function()
+                    AuraUtil.ForEachAura(uid, "HARMFUL|RAID", nil, function()
+                        found = true
+                        return true  -- stop iteration
+                    end)
+                end)
+                if found then return true, uid end
+            end
+        end
+    end
+    return false, nil
+end
+
 function DT:CheckAlert()
     if not Config:Get("dispelAlertEnabled") then return end
     if visibilityState ~= "ACTIVE" then return end
@@ -625,15 +655,29 @@ function DT:CheckAlert()
         return
     end
 
-    -- Debounce
+    -- Only alert if someone actually has a dispellable debuff
+    local hasDebuff, debuffUnit = AnyDispellableDebuff()
+    if not hasDebuff then
+        -- No debuffs → reset the flag so we alert again when new debuffs appear
+        alertedForCurrentDebuffs = false
+        return
+    end
+
+    -- Already alerted for current debuffs — don't spam. Resets when:
+    --   1. Player actually dispels (HandleDispelByName clears it)
+    --   2. All debuffs cleared (above)
+    --   3. Rotation changes (someone else dispels, it becomes our turn again)
+    if alertedForCurrentDebuffs then return end
+
+    -- Debounce (safety net — shouldn't fire often with the flag above)
     local now = GetTime()
     if now - lastAlertTime < ALERT_DEBOUNCE_SEC then return end
     lastAlertTime = now
+    alertedForCurrentDebuffs = true
 
-    -- Play multiple sounds to ensure audibility
     local alertText = Config:Get("dispelAlertText") or "Dispel"
     Util.SpeakTTS(alertText)
-    Log:Log("INFO", "DispelTracker: ALERT — TTS: " .. alertText)
+    Log:Log("INFO", string.format("DispelTracker: ALERT — TTS: %s (debuff on %s)", alertText, tostring(debuffUnit)))
 end
 
 ------------------------------------------------------------------------
@@ -704,6 +748,13 @@ local function HandleDispelByName(casterName, spellID, groupIdx)
     local gs = groups[groupIdx]
     casterName = StripRealm(casterName)
     local now = GetTime()
+
+    -- Reset alert flag — player dispelled, allow re-alert for next debuff wave
+    local playerName = UnitName("player")
+    if playerName and StripRealm(playerName) == casterName then
+        alertedForCurrentDebuffs = false
+    end
+
     Log:Log("INFO", string.format("DispelTracker: %s used dispel (spell %s) group %d at %.2f", casterName, tostring(spellID), groupIdx, now))
 
     -- Record CD for the caster regardless of whose turn it is
@@ -726,6 +777,7 @@ local function HandleDispelByName(casterName, spellID, groupIdx)
 
     -- Only re-alert if rotation actually changed (avoid duplicate TTS on out-of-order casts)
     if didAdvance then
+        alertedForCurrentDebuffs = false  -- rotation changed, allow fresh alert
         DT:CheckAlert()
     end
 
@@ -807,6 +859,8 @@ eventFrame:SetScript("OnEvent", function(self, event, ...)
         if not groupUnits[unit] and unit ~= "player" then return end
         ScanUnitAuras(unit)
         UpdateVisibility()
+        -- Re-check alert: a new debuff may have appeared while it's our turn
+        DT:CheckAlert()
 
     elseif event == "UNIT_SPELLCAST_SUCCEEDED" then
         local unit, _, spellID = ...
@@ -916,9 +970,17 @@ end
 function DT:Unlock()
     for gi = 1, MAX_GROUPS do
         local af = groups[gi].anchorFrame
-        if af then af:EnableMouse(true); af:Show(); af:SetAlpha(1.0) end
+        if af then
+            af:EnableMouse(true)
+            af:Show()
+            af:SetAlpha(1.0)
+            af:SetBackdropBorderColor(1.0, 0.8, 0.0, 0.9)
+            local ht = groups[gi].headerText
+            if ht then
+                ht:SetText("|cFFCC88FFDispel Tracker" .. (gi > 1 and (" G" .. gi) or "") .. "|r  |cFFFFCC00DRAG TO MOVE|r")
+            end
+        end
     end
-    print("|cFFCC88FF[HexCD]|r Dispel tracker unlocked — drag to reposition.")
 end
 
 function DT:Lock()
@@ -926,10 +988,10 @@ function DT:Lock()
         local af = groups[gi].anchorFrame
         if af then
             af:EnableMouse(false)
+            af:SetBackdropBorderColor(0.5, 0.3, 0.7, 0.8)
             if visibilityState == "HIDDEN" then af:Hide() end
         end
     end
-    print("|cFFCC88FF[HexCD]|r Dispel tracker locked.")
 end
 
 function DT:IsUnlocked()

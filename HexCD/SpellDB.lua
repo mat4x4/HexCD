@@ -1,13 +1,16 @@
 ------------------------------------------------------------------------
 -- HexCD: SpellDB — Spell database for party CD tracking
 --
--- Categories:
---   PERSONAL    — Personal defensives + immunities (per-player)
---   PARTY_RANGED — Party defensives that work at range (Rally, VE)
---   PARTY_STACKED — Party defensives requiring stacking (AMZ, Darkness, Barrier)
---   HEALING     — Major healing throughput CDs
---   INTERRUPT   — Interrupts
---   DISPEL      — Healer dispels
+-- 9 Categories:
+--   PERSONAL           — Personal defensives + immunities (per-player)
+--   RANGED_DEFENSIVE   — Party defensives that work at range (Rally, VE)
+--   STACKED_DEFENSIVE  — Party defensives requiring stacking (AMZ, Darkness, Barrier)
+--   UTILITY            — Utility abilities (Roar, Grip, Freedom, Rescue)
+--   HEALING            — Major healing throughput CDs
+--   KICK               — Interrupts
+--   ST_CC              — Single-target crowd control
+--   AOE_CC             — Area-of-effect crowd control
+--   DISPEL             — Healer dispels
 ------------------------------------------------------------------------
 HexCD = HexCD or {}
 HexCD.SpellDB = {}
@@ -15,7 +18,7 @@ HexCD.SpellDB = {}
 local DB = HexCD.SpellDB
 
 ------------------------------------------------------------------------
--- Personal Defensives + Immunities (keyed by spellID)
+-- Personal Defensives + Immunities
 ------------------------------------------------------------------------
 local PERSONAL = {
     -- Death Knight
@@ -68,23 +71,42 @@ local PERSONAL = {
 }
 
 ------------------------------------------------------------------------
--- Ranged Party Defensives (affect group regardless of position)
+-- External Defensives (party/raid CDs that protect others)
+-- Subtypes for future granular breakdown:
+--   ranged  — works at any range (Rally, VE, Aura Mastery)
+--   stacked — requires positioning (AMZ, Darkness, Barrier, Spirit Link)
+--   single  — single-target external (BoP, Pain Suppression, Ironbark)
 ------------------------------------------------------------------------
-local PARTY_RANGED = {
+local EXTERNAL_DEFENSIVE = {
+    -- Ranged (group-wide, no positioning needed)
     [97462]  = { name = "Rallying Cry",         cd = 180, class = "WARRIOR" },
     [15286]  = { name = "Vampiric Embrace",     cd = 120, class = "PRIEST" },
-}
-
-------------------------------------------------------------------------
--- Stacked Party Defensives (require positioning / area effect)
-------------------------------------------------------------------------
-local PARTY_STACKED = {
+    [31821]  = { name = "Aura Mastery",         cd = 180, class = "PALADIN" },
+    -- Stacked (require positioning / area effect)
     [51052]  = { name = "Anti-Magic Zone",      cd = 120, class = "DEATHKNIGHT" },
     [196718] = { name = "Darkness",             cd = 180, class = "DEMONHUNTER" },
     [62618]  = { name = "Power Word: Barrier",  cd = 180, class = "PRIEST" },
     [98008]  = { name = "Spirit Link Totem",    cd = 180, class = "SHAMAN" },
-    [31821]  = { name = "Aura Mastery",         cd = 180, class = "PALADIN" },
     [374227] = { name = "Zephyr",               cd = 120, class = "EVOKER" },
+}
+
+------------------------------------------------------------------------
+-- Utility (movement, grips, externals that aren't defensives)
+------------------------------------------------------------------------
+local UTILITY = {
+    -- Movement
+    [106898] = { name = "Stampeding Roar",      cd = 120, class = "DRUID" },
+    [116841] = { name = "Tiger's Lust",         cd = 30,  class = "MONK" },
+    [1044]   = { name = "Blessing of Freedom",  cd = 25,  class = "PALADIN" },
+    -- Grips / Rescue
+    [49576]  = { name = "Death Grip",           cd = 25,  class = "DEATHKNIGHT" },
+    [73325]  = { name = "Leap of Faith",        cd = 90,  class = "PRIEST" },
+    [370665] = { name = "Rescue",               cd = 60,  class = "EVOKER" },
+    -- Externals
+    [53480]  = { name = "Roar of Sacrifice",    cd = 60,  class = "HUNTER" },
+    [29166]  = { name = "Innervate",            cd = 180, class = "DRUID" },
+    [1022]   = { name = "Blessing of Protection", cd = 300, class = "PALADIN" },
+    [6940]   = { name = "Blessing of Sacrifice", cd = 120, class = "PALADIN" },
 }
 
 ------------------------------------------------------------------------
@@ -109,9 +131,9 @@ local HEALING = {
 }
 
 ------------------------------------------------------------------------
--- Interrupts
+-- Kicks (interrupts)
 ------------------------------------------------------------------------
-local INTERRUPT = {
+local KICK = {
     [106839] = { name = "Skull Bash",           cd = 15,  class = "DRUID" },
     [2139]   = { name = "Counterspell",         cd = 24,  class = "MAGE" },
     [1766]   = { name = "Kick",                 cd = 15,  class = "ROGUE" },
@@ -122,6 +144,38 @@ local INTERRUPT = {
     [57994]  = { name = "Wind Shear",           cd = 12,  class = "SHAMAN" },
     [183752] = { name = "Disrupt",              cd = 15,  class = "DEMONHUNTER" },
     [351338] = { name = "Quell",                cd = 40,  class = "EVOKER" },
+    [147362] = { name = "Counter Shot",         cd = 24,  class = "HUNTER" },
+}
+
+------------------------------------------------------------------------
+-- Crowd Control (ST + AoE combined)
+------------------------------------------------------------------------
+local CC = {
+    -- Single-target
+    [118]    = { name = "Polymorph",            cd = 0,   class = "MAGE" },
+    [51514]  = { name = "Hex",                  cd = 30,  class = "SHAMAN" },
+    [20066]  = { name = "Repentance",           cd = 15,  class = "PALADIN" },
+    [217832] = { name = "Imprison",             cd = 45,  class = "DEMONHUNTER" },
+    [339]    = { name = "Entangling Roots",     cd = 0,   class = "DRUID" },
+    [2637]   = { name = "Hibernate",            cd = 0,   class = "DRUID" },
+    [710]    = { name = "Banish",               cd = 0,   class = "WARLOCK" },
+    [5782]   = { name = "Fear",                 cd = 0,   class = "WARLOCK" },
+    [9484]   = { name = "Shackle Undead",       cd = 0,   class = "PRIEST" },
+    [605]    = { name = "Mind Control",         cd = 0,   class = "PRIEST" },
+    [115078] = { name = "Paralysis",            cd = 45,  class = "MONK" },
+    -- AoE
+    [192058] = { name = "Capacitor Totem",      cd = 60,  class = "SHAMAN" },
+    [113724] = { name = "Ring of Frost",        cd = 45,  class = "MAGE" },
+    [102793] = { name = "Ursol's Vortex",       cd = 60,  class = "DRUID" },
+    [202137] = { name = "Sigil of Silence",     cd = 60,  class = "DEMONHUNTER" },
+    [207684] = { name = "Sigil of Misery",      cd = 120, class = "DEMONHUNTER" },
+    [105421] = { name = "Blinding Light",       cd = 60,  class = "PALADIN" },
+    [102359] = { name = "Mass Entanglement",    cd = 30,  class = "DRUID" },
+    [5246]   = { name = "Intimidating Shout",   cd = 90,  class = "WARRIOR" },
+    [119381] = { name = "Leg Sweep",            cd = 60,  class = "MONK" },
+    [8122]   = { name = "Psychic Scream",       cd = 45,  class = "PRIEST" },
+    [30283]  = { name = "Shadowfury",           cd = 60,  class = "WARLOCK" },
+    [179057] = { name = "Chaos Nova",           cd = 60,  class = "DEMONHUNTER" },
 }
 
 ------------------------------------------------------------------------
@@ -140,6 +194,18 @@ local DISPEL = {
 -- Combined lookup: spellID → { name, cd, class, category }
 ------------------------------------------------------------------------
 local ALL_SPELLS = {}
+
+-- Category aliases: old name → new name (for backward compat in existing code)
+local CATEGORY_ALIASES = {
+    PARTY_RANGED      = "EXTERNAL_DEFENSIVE",
+    PARTY_STACKED     = "EXTERNAL_DEFENSIVE",
+    RANGED_DEFENSIVE  = "EXTERNAL_DEFENSIVE",
+    STACKED_DEFENSIVE = "EXTERNAL_DEFENSIVE",
+    INTERRUPT         = "KICK",
+    ST_CC             = "CC",
+    AOE_CC            = "CC",
+}
+
 local function Register(tbl, category)
     for id, info in pairs(tbl) do
         ALL_SPELLS[id] = {
@@ -151,12 +217,32 @@ local function Register(tbl, category)
         }
     end
 end
+
 Register(PERSONAL, "PERSONAL")
-Register(PARTY_RANGED, "PARTY_RANGED")
-Register(PARTY_STACKED, "PARTY_STACKED")
+Register(EXTERNAL_DEFENSIVE, "EXTERNAL_DEFENSIVE")
+Register(UTILITY, "UTILITY")
 Register(HEALING, "HEALING")
-Register(INTERRUPT, "INTERRUPT")
+Register(KICK, "KICK")
+Register(CC, "CC")
 Register(DISPEL, "DISPEL")
+
+------------------------------------------------------------------------
+-- All category names in display order (7 categories)
+------------------------------------------------------------------------
+DB.CATEGORIES = {
+    "PERSONAL", "EXTERNAL_DEFENSIVE",
+    "UTILITY", "HEALING", "KICK", "CC", "DISPEL",
+}
+
+DB.CATEGORY_LABELS = {
+    PERSONAL            = "Personal Defensives",
+    EXTERNAL_DEFENSIVE  = "External Defensives",
+    UTILITY             = "Utility",
+    HEALING             = "Healing CDs",
+    KICK                = "Kicks",
+    CC                  = "Crowd Control",
+    DISPEL              = "Dispels",
+}
 
 ------------------------------------------------------------------------
 -- Public API
@@ -175,10 +261,13 @@ function DB:GetAllSpells()
     return ALL_SPELLS
 end
 
+--- Get spells by category. Accepts both new and old category names.
 function DB:GetByCategory(category)
+    -- Resolve alias if old name used
+    local resolved = CATEGORY_ALIASES[category] or category
     local result = {}
     for id, info in pairs(ALL_SPELLS) do
-        if info.category == category then
+        if info.category == resolved then
             result[id] = info
         end
     end
@@ -187,4 +276,9 @@ end
 
 function DB:IsTracked(spellID)
     return ALL_SPELLS[spellID] ~= nil
+end
+
+--- Resolve old category names to new names
+function DB:ResolveCategory(category)
+    return CATEGORY_ALIASES[category] or category
 end

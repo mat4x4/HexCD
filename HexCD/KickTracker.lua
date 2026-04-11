@@ -330,18 +330,40 @@ function KT:_correlRoute(shortName, bestUnit)
         if found then break end
     end
     if not found then
-        Log:Log("INFO", string.format("KickCorrel: %s kicked (not in rotation) — auto-adding to group 1", shortName))
-        local classInfo = nil
+        -- Verify this person is actually in the current party before auto-adding
+        local inParty = false
         pcall(function()
-            local _, c = UnitClass(bestUnit)
-            if c and not (issecretvalue and issecretvalue(c)) then
-                classInfo = KICK_SPELLS[CLASSTOKEN_TO_NAME[c:upper()] or ""]
+            for i = 1, 4 do
+                local uid = "party" .. i
+                if UnitExists(uid) then
+                    local n = UnitName(uid)
+                    if n and not (issecretvalue and issecretvalue(n)) then
+                        if n:match("^([^-]+)") == shortName then inParty = true end
+                    end
+                end
             end
         end)
-        local spellID = classInfo and classInfo.spellID or 0
-        local cd = classInfo and classInfo.cd or 15
-        table.insert(groups[1].rotation, { name = shortName, class = nil, spellID = spellID, cd = cd })
-        if #groups[1].rotation == 1 then groups[1].currentIdx = 1 end
+        if not inParty then
+            Log:Log("DEBUG", string.format("KickCorrel: %s kicked but not in party — skipping auto-add", shortName))
+        else
+            -- Cap: don't exceed party size (4 party members max for kicks)
+            if #groups[1].rotation >= 4 then
+                Log:Log("DEBUG", string.format("KickCorrel: %s kicked but rotation full (%d) — skipping", shortName, #groups[1].rotation))
+            else
+                Log:Log("INFO", string.format("KickCorrel: %s kicked (not in rotation) — auto-adding to group 1", shortName))
+                local classInfo = nil
+                pcall(function()
+                    local _, c = UnitClass(bestUnit)
+                    if c and not (issecretvalue and issecretvalue(c)) then
+                        classInfo = KICK_SPELLS[CLASSTOKEN_TO_NAME[c:upper()] or ""]
+                    end
+                end)
+                local spellID = classInfo and classInfo.spellID or 0
+                local cd = classInfo and classInfo.cd or 15
+                table.insert(groups[1].rotation, { name = shortName, class = nil, spellID = spellID, cd = cd })
+                if #groups[1].rotation == 1 then groups[1].currentIdx = 1 end
+            end
+        end
         kickRotation = groups[1].rotation
         HandleKickByName(shortName, spellID, 1, "correlated")
     end
@@ -1020,9 +1042,13 @@ function KT:Unlock()
             af:EnableMouse(true)
             af:Show()
             af:SetAlpha(1.0)
+            af:SetBackdropBorderColor(1.0, 0.8, 0.0, 0.9)
+            local ht = groups[gi].headerText
+            if ht then
+                ht:SetText("|cFF88CCFFKick Tracker" .. (gi > 1 and (" G" .. gi) or "") .. "|r  |cFFFFCC00DRAG TO MOVE|r")
+            end
         end
     end
-    print("|cFF88CCFF[HexCD]|r Kick tracker unlocked — drag to reposition.")
 end
 
 function KT:Lock()
@@ -1030,10 +1056,10 @@ function KT:Lock()
         local af = groups[gi].anchorFrame
         if af then
             af:EnableMouse(false)
+            af:SetBackdropBorderColor(0.3, 0.5, 0.7, 0.8)
             if visibilityState == "HIDDEN" then af:Hide() end
         end
     end
-    print("|cFF88CCFF[HexCD]|r Kick tracker locked.")
 end
 
 function KT:IsUnlocked()

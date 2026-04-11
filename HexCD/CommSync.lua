@@ -58,6 +58,24 @@ local DEBOUNCE_WINDOW = 2.0
 local lastDirectCast = {} -- spellID → GetTime()
 
 ------------------------------------------------------------------------
+-- Taint laundering (same technique as KickTracker, from InterruptTracker)
+-- UNIT_SPELLCAST_SUCCEEDED spellID for party members is a "secret value"
+-- in Midnight 12.0. Passing it through a StatusBar's SetValue causes C++
+-- to re-emit a clean numeric value via OnValueChanged.
+------------------------------------------------------------------------
+local launderBar = CreateFrame("StatusBar")
+launderBar:SetMinMaxValues(0, 9999999)
+local _launderedID = nil
+launderBar:SetScript("OnValueChanged", function(_, v) _launderedID = v end)
+
+local function LaunderSpellID(spellID)
+    _launderedID = nil
+    launderBar:SetValue(0)
+    pcall(launderBar.SetValue, launderBar, spellID)
+    return _launderedID  -- nil if laundering failed
+end
+
+------------------------------------------------------------------------
 -- Helpers
 ------------------------------------------------------------------------
 
@@ -298,16 +316,24 @@ local function OnAddonMessage(prefix, msg, channel, sender)
             name = StripRealm(name)
             local spellID = tonumber(spellIDStr)
             local effectiveCD = tonumber(cdStr)
-            local now = GetTime()
-            partyCD[name] = partyCD[name] or {}
-            partyCD[name][spellID] = {
-                readyTime = now + effectiveCD,
-                effectiveCD = effectiveCD,
-                castTime = now,
-            }
             local info = HexCD.SpellDB and HexCD.SpellDB:GetSpell(spellID)
-            Log:Log("DEBUG", string.format("CommSync CDCAST from %s | %s(%d) cd=%ds",
-                name, info and info.name or "?", spellID, effectiveCD))
+
+            -- Cross-layer dedup: skip if Layer 1/2/3 already recorded this CD
+            local ADmod = HexCD.AuraDetector
+            if ADmod and ADmod.IsDuplicate and ADmod:IsDuplicate(name, spellID) then
+                Log:Log("DEBUG", string.format("CommSync CDCAST from %s | %s(%d) cd=%ds — DEDUP [comms]",
+                    name, info and info.name or "?", spellID, effectiveCD))
+            else
+                local now = GetTime()
+                partyCD[name] = partyCD[name] or {}
+                partyCD[name][spellID] = {
+                    readyTime = now + effectiveCD,
+                    effectiveCD = effectiveCD,
+                    castTime = now,
+                }
+                Log:Log("DEBUG", string.format("CommSync CDCAST from %s | %s(%d) cd=%ds [comms]",
+                    name, info and info.name or "?", spellID, effectiveCD))
+            end
         end
 
     elseif tag == "CDSTATE" then
@@ -358,27 +384,75 @@ local function OnEvent(self, event, ...)
     if event == "UNIT_SPELLCAST_SUCCEEDED" then
         local unit, _, spellID = ...
 
-        -- Track party member personal CD casts (partyN units)
-        if unit ~= "player" then
-            -- spellID may be a secret value for non-player units (WoW taint)
-            if issecretvalue and issecretvalue(spellID) then return end
-            if type(spellID) ~= "number" then return end
+        -- Track party member personal CD casts (partyN units only)
+        -- Layer 2: direct spellID (works when not secret)
+        -- Layer 3: taint laundering (StatusBar trick to unwrap secret values)
+        -- Layer 4: addon comms (CDCAST) handled separately in OnAddonMessage
+        local isPartyUnit = (unit == "party1" or unit == "party2" or unit == "party3" or unit == "party4")
+        if isPartyUnit then
             pcall(function()
                 local n = UnitName(unit)
                 if not n or (issecretvalue and issecretvalue(n)) then return end
                 local unitName = StripRealm(n)
-                if not unitName or not partyCD[unitName] or not partyCD[unitName][spellID] then return end
-                local info = HexCD.SpellDB and HexCD.SpellDB:GetSpell(spellID)
-                if not info or info.category ~= "PERSONAL" then return end
+                if not unitName or not partyCD[unitName] then return end
+
+                -- Layer 2: try direct spellID access
+                local cleanID = nil
+                local layer = "none"
+                if not (issecretvalue and issecretvalue(spellID)) and type(spellID) == "number" then
+                    cleanID = spellID
+                    layer = "direct"
+                end
+
+                -- Layer 3: taint laundering if direct failed
+                if not cleanID then
+                    cleanID = LaunderSpellID(spellID)
+                    if cleanID then layer = "laundered" end
+                end
+
+                if not cleanID then
+                    Log:Log("DEBUG", string.format("Layer2+3: %s (%s) — spellID secret+launder failed, skip", unitName, unit))
+                    return
+                end
+
+                -- Check if this spell is tracked
+                local info = HexCD.SpellDB and HexCD.SpellDB:GetSpell(cleanID)
+                if not info then
+                    -- Not in SpellDB — not a tracked spell, ignore silently
+                    return
+                end
+
+                if info.category ~= "PERSONAL" then
+                    -- Non-personal spell (kick, heal, CC etc.) — handled by other trackers
+                    return
+                end
+
+                if not partyCD[unitName][cleanID] then
+                    Log:Log("DEBUG", string.format("Layer2+3: %s %s(%d) — spell not in partyCD [%s]",
+                        unitName, info.name, cleanID, layer))
+                    return
+                end
+
+                -- Cross-layer dedup: skip if Layer 1 (aura) already recorded this
+                local ADmod = HexCD.AuraDetector
+                if ADmod and ADmod.IsDuplicate and ADmod:IsDuplicate(unitName, cleanID) then
+                    Log:Log("DEBUG", string.format("Layer2+3: %s %s(%d) — DEDUP [%s]",
+                        unitName, info.name, cleanID, layer))
+                    return
+                end
+
                 local now = GetTime()
-                partyCD[unitName][spellID] = {
+                partyCD[unitName][cleanID] = {
                     readyTime = now + info.cd,
                     effectiveCD = info.cd,
                     castTime = now,
                 }
-                Log:Log("DEBUG", string.format("CommSync: %s cast %s(%d) — CD %ds", unitName, info.name or "spell", spellID, info.cd))
+                Log:Log("DEBUG", string.format("Layer2+3: %s %s(%d) CD %ds [%s]",
+                    unitName, info.name, cleanID, info.cd, layer))
             end)
             return
+        elseif unit ~= "player" then
+            return  -- ignore targettarget, focus, nameplate, etc.
         end
 
         -- Local player: only handle spells NOT already covered by CooldownTracker callback
@@ -452,6 +526,10 @@ local function OnEvent(self, event, ...)
     elseif event == "PLAYER_REGEN_DISABLED" then
         inCombat = true
         Log:Log("DEBUG", "CommSync COMBAT START")
+        -- Reset AuraDetector probes for fresh data each pull
+        if HexCD.AuraDetector and HexCD.AuraDetector.Reset then
+            HexCD.AuraDetector:Reset()
+        end
 
     elseif event == "PLAYER_REGEN_ENABLED" then
         inCombat = false
