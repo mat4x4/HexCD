@@ -276,10 +276,11 @@ function DT:RebuildGroupMapping()
     wipe(groupUnits)
     wipe(rotationUnitMap)
 
+    local DUtil = HexCD.Util
     local prefix, count
-    if IsInRaid() then
+    if DUtil.IsInRaid() then
         prefix, count = "raid", GetNumGroupMembers()
-    elseif IsInGroup() then
+    elseif DUtil.IsInAnyGroup() then
         prefix, count = "party", GetNumGroupMembers() - 1
         -- Include player
         groupUnits["player"] = true
@@ -640,10 +641,7 @@ end
 ------------------------------------------------------------------------
 
 local function GetAddonChannel()
-    if IsInRaid() then return "RAID"
-    elseif IsInGroup() then return "PARTY"
-    end
-    return nil
+    return HexCD.Util.GetGroupChannel()
 end
 
 local function BroadcastDispelCast(casterName, spellID, groupIdx)
@@ -661,8 +659,9 @@ local function BroadcastDispelCast(casterName, spellID, groupIdx)
     end
 
     -- Fallback: whisper each member individually
+    local unitPrefix = HexCD.Util.GetGroupUnitInfo()
     for i = 1, GetNumGroupMembers() do
-        local unit = (IsInRaid() and "raid" or "party") .. i
+        local unit = unitPrefix .. i
         if UnitExists(unit) then
             local name, realm = UnitName(unit)
             local target = realm and realm ~= "" and (name .. "-" .. realm) or name
@@ -850,7 +849,7 @@ end)
 --- Only sets rotation if no manual rotation exists for group 1.
 --- Party: all healer-spec dispellers. Raid: all healers.
 function DT:AutoEnroll()
-    if not IsInGroup() then return end
+    if not HexCD.Util.IsInAnyGroup() then return end
 
     local comp = Util.ScanGroupComposition()
     if #comp.dispellers == 0 then return end

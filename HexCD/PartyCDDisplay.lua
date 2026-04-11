@@ -171,17 +171,37 @@ end
 -- Find unit frame (Danders API first, then patterns)
 ------------------------------------------------------------------------
 
+-- Extract unit ID from a frame (tries multiple access paths)
+local function GetFrameUnit(f)
+    local unit = nil
+    pcall(function()
+        unit = f.displayedUnit or f.unit
+            or (f.GetAttribute and f:GetAttribute("unit"))
+    end)
+    return unit
+end
+
+-- Check if a frame's unit matches the target player name
+local function FrameMatchesPlayer(f, playerName)
+    local unit = GetFrameUnit(f)
+    if not unit then return false end
+    local ok, name = pcall(UnitName, unit)
+    if ok and name and not (issecretvalue and issecretvalue(name)) then
+        return StripRealm(name) == playerName
+    end
+    return false
+end
+
 local function FindUnitFrame(playerName)
+    local Log = HexCD.DebugLog
+
     -- Danders API
     if DandersFrames_GetAllFrames then
         local ok, allFrames = pcall(DandersFrames_GetAllFrames)
         if ok and allFrames then
             for _, f in ipairs(allFrames) do
                 if f and f.unit then
-                    local ok2, name = pcall(UnitName, f.unit)
-                    if ok2 and name and not (issecretvalue and issecretvalue(name)) then
-                        if StripRealm(name) == playerName then return f end
-                    end
+                    if FrameMatchesPlayer(f, playerName) then return f end
                 end
             end
         end
@@ -193,26 +213,47 @@ local function FindUnitFrame(playerName)
             local frameName = pattern.noIndex and pattern.frames or string.format(pattern.frames, i)
             local f = _G[frameName]
             if f then
-                local unit = nil
-                pcall(function()
-                    unit = f[pattern.unit] or (f.GetAttribute and f:GetAttribute("unit"))
-                end)
-                if unit then
-                    local ok, name = pcall(UnitName, unit)
-                    if ok and name and not (issecretvalue and issecretvalue(name)) then
-                        if StripRealm(name) == playerName then return f end
-                    end
-                end
+                if FrameMatchesPlayer(f, playerName) then return f end
             end
         end
     end
 
-    -- Last resort: if this is the local player, use PlayerFrame
-    local ok, localName = pcall(UnitName, "player")
-    if ok and localName and StripRealm(localName) == playerName then
-        if PlayerFrame and PlayerFrame:IsShown() then return PlayerFrame end
+    -- UnitID-based fallback: find which partyN matches, then scan Blizzard frames by unitID
+    local targetUnit = nil
+    for i = 1, 4 do
+        local uid = "party" .. i
+        local ok, name = pcall(UnitName, uid)
+        if ok and name and StripRealm(name) == playerName then
+            targetUnit = uid
+            break
+        end
+    end
+    if not targetUnit then
+        local ok, name = pcall(UnitName, "player")
+        if ok and name and StripRealm(name) == playerName then
+            targetUnit = "player"
+        end
     end
 
+    if targetUnit then
+        -- Scan Blizzard compact frames matching this exact unitID
+        for i = 1, 5 do
+            local f = _G["CompactPartyFrameMember" .. i]
+            if f and GetFrameUnit(f) == targetUnit then return f end
+        end
+        for i = 1, 40 do
+            local f = _G["CompactRaidFrame" .. i]
+            if f and GetFrameUnit(f) == targetUnit then return f end
+        end
+        -- Last resort: PlayerFrame for local player
+        if targetUnit == "player" and PlayerFrame and PlayerFrame:IsShown() then
+            return PlayerFrame
+        end
+    end
+
+    if Log then
+        Log:Log("DEBUG", "FindUnitFrame: no frame found for " .. tostring(playerName))
+    end
     return nil
 end
 
@@ -477,14 +518,23 @@ end
 ------------------------------------------------------------------------
 
 local pcdDebugOnce = true
+local pcdGroupDebugOnce = true
 local function UpdateDisplay()
     if not isVisible then return end
-    -- Only show in party (not solo, not raid) unless test mode
+    -- Only show in group (not solo) unless test mode
     local CS = HexCD.CommSync
     if not CS then return end
-    local inParty = IsInGroup and IsInGroup() and not (IsInRaid and IsInRaid())
+    local Util = HexCD.Util
+    local inGroup = Util and Util.IsInAnyGroup()
     local testing = CS.IsTestMode and CS:IsTestMode()
-    if not inParty and not testing then
+    if not inGroup and not testing then
+        if pcdGroupDebugOnce then
+            pcdGroupDebugOnce = false
+            local Log = HexCD.DebugLog
+            if Log then
+                Log:Log("DEBUG", "PartyCDDisplay: NOT in group — hiding personal bars")
+            end
+        end
         for _, bar in pairs(personalBars) do bar.container:Hide() end
         return
     end
@@ -557,6 +607,11 @@ end
 
 function PCD:IsVisible()
     return isVisible
+end
+
+function PCD:ResetDebug()
+    pcdDebugOnce = true
+    pcdGroupDebugOnce = true
 end
 
 function PCD:ShowDetached()

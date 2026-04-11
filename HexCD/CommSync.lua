@@ -30,7 +30,9 @@ local ADDON_MSG_PREFIX = "HexCD"
 local commsRegistered = false
 local eventFrame = nil
 local lastHelloTime = 0
-local HELLO_DEBOUNCE = 30  -- don't send CDHELLO more than once per 30s
+local HELLO_DEBOUNCE = 5   -- min seconds between CDHELLO sends
+local rosterTimer = nil    -- coalesce rapid GROUP_ROSTER_UPDATE events
+local helloRetryTimer = nil -- retry timer for failed/unknown CDHELLO
 
 -- Party CD state: partyCD[playerName][spellID] = { readyTime, effectiveCD, castTime }
 -- partyCD[playerName]._spec = "specName"
@@ -55,10 +57,7 @@ local lastDirectCast = {} -- spellID → GetTime()
 ------------------------------------------------------------------------
 
 local function GetAddonChannel()
-    if IsInRaid() then return "RAID"
-    elseif IsInGroup() then return "PARTY"
-    end
-    return nil
+    return HexCD.Util.GetGroupChannel()
 end
 
 local function StripRealm(name)
@@ -82,15 +81,38 @@ end
 -- Send: CDHELLO
 ------------------------------------------------------------------------
 
-local function SendCDHello()
-    if not commsRegistered then return end
-    local channel = GetAddonChannel()
-    if not channel then return end
+--- Cancel any pending CDHELLO retry timer.
+local function CancelHelloRetry()
+    if helloRetryTimer then
+        helloRetryTimer:Cancel()
+        helloRetryTimer = nil
+    end
+end
 
-    -- Debounce: don't spam CDHELLO on rapid GROUP_ROSTER_UPDATE
+--- Schedule a CDHELLO retry after `delaySec` seconds.
+local function ScheduleHelloRetry(delaySec, reason)
+    CancelHelloRetry()
+    helloRetryTimer = C_Timer.NewTimer(delaySec, function()
+        helloRetryTimer = nil
+        lastHelloTime = 0  -- clear debounce so the retry goes through
+        SendCDHello()
+    end)
+    Log:Log("DEBUG", "CommSync: CDHELLO retry in " .. delaySec .. "s (" .. reason .. ")")
+end
+
+function SendCDHello()
+    if not commsRegistered then return end
+
+    -- Debounce: don't spam CDHELLO
     local now = GetTime()
     if now - lastHelloTime < HELLO_DEBOUNCE then return end
-    lastHelloTime = now
+
+    local channel = GetAddonChannel()
+    if not channel then
+        -- No channel yet (solo or APIs not ready) — retry in 3s
+        ScheduleHelloRetry(3, "no channel")
+        return
+    end
 
     local specName = "Unknown"
     if GetSpecialization and GetSpecializationInfo then
@@ -101,10 +123,16 @@ local function SendCDHello()
         end
     end
     localSpec = specName
+    lastHelloTime = now
 
     local msg = "CDHELLO:" .. (localPlayerName or "Unknown") .. ":" .. specName
     pcall(C_ChatInfo.SendAddonMessage, ADDON_MSG_PREFIX, msg, channel)
     Log:Log("DEBUG", "CommSync: sent CDHELLO spec=" .. specName)
+
+    -- If spec was "Unknown", GetSpecialization wasn't ready — retry in 3s
+    if specName == "Unknown" then
+        ScheduleHelloRetry(3, "spec unknown")
+    end
 end
 
 ------------------------------------------------------------------------
@@ -252,6 +280,11 @@ local function OnAddonMessage(prefix, msg, channel, sender)
                     Log:Log("DEBUG", string.format("CommSync: pre-populated %d PERSONAL spells for %s (%s)", count, name, theirClass))
                 end
             end)
+
+            -- Reply with our own CDHELLO so the sender discovers us too
+            -- (e.g., they just /reloaded and don't know about us yet)
+            -- Short delay + debounce prevents ping-pong loops
+            C_Timer.After(1, function() SendCDHello() end)
         end
 
     elseif tag == "CDCAST" then
@@ -348,11 +381,26 @@ local function OnEvent(self, event, ...)
         OnAddonMessage(prefix, msg, channel, sender)
 
     elseif event == "GROUP_ROSTER_UPDATE" then
-        -- Re-announce and prune stale players
-        SendCDHello()
+        -- Coalesce rapid GROUP_ROSTER_UPDATE events (fires many times on group changes)
         CS:PruneStale()
+        if not rosterTimer then
+            rosterTimer = C_Timer.After(2, function()
+                rosterTimer = nil
+                SendCDHello()
+            end)
+        end
+
+    elseif event == "PLAYER_ENTERING_WORLD" then
+        -- Fires after /reload and zone transitions — APIs are fully ready here
+        -- Short delay to let group state settle
+        CancelHelloRetry()
+        C_Timer.After(1, function()
+            lastHelloTime = 0  -- clear debounce so hello goes through
+            SendCDHello()
+        end)
 
     elseif event == "PLAYER_SPECIALIZATION_CHANGED" then
+        lastHelloTime = 0  -- always allow re-announce on spec change
         SendCDHello()
 
     elseif event == "ENCOUNTER_START" then
@@ -385,6 +433,10 @@ local function OnEvent(self, event, ...)
     elseif event == "CHALLENGE_MODE_START" then
         inMythicPlus = true
         Log:Log("INFO", "CommSync M+ KEY STARTED")
+        -- Reset PartyCDDisplay debug diagnostics for this key
+        if HexCD.PartyCDDisplay and HexCD.PartyCDDisplay.ResetDebug then
+            HexCD.PartyCDDisplay:ResetDebug()
+        end
 
     elseif event == "CHALLENGE_MODE_COMPLETED" then
         inMythicPlus = false
@@ -413,6 +465,7 @@ function CS:Init()
     eventFrame:RegisterEvent("UNIT_SPELLCAST_SUCCEEDED")
     eventFrame:RegisterEvent("CHAT_MSG_ADDON")
     eventFrame:RegisterEvent("GROUP_ROSTER_UPDATE")
+    eventFrame:RegisterEvent("PLAYER_ENTERING_WORLD")
     eventFrame:RegisterEvent("PLAYER_SPECIALIZATION_CHANGED")
     eventFrame:RegisterEvent("ENCOUNTER_START")
     eventFrame:RegisterEvent("ENCOUNTER_END")

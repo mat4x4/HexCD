@@ -7,6 +7,44 @@ HexCD.Util = {}
 
 local Util = HexCD.Util
 
+------------------------------------------------------------------------
+-- Group state helpers (consistent across party / instance group / raid)
+-- WoW has two group categories:
+--   LE_PARTY_CATEGORY_HOME     (1 or nil) — normal invite
+--   LE_PARTY_CATEGORY_INSTANCE (2)        — LFG / M+ / instance
+-- IsInGroup() without args only checks HOME. M+ uses INSTANCE.
+------------------------------------------------------------------------
+
+--- True if the player is in any group (party, instance, or raid).
+function Util.IsInAnyGroup()
+    return (IsInGroup and (IsInGroup() or IsInGroup(2))) and true or false
+end
+
+--- True if the player is in a raid-sized group.
+function Util.IsInRaid()
+    return (IsInRaid and IsInRaid()) and true or false
+end
+
+--- Returns the addon message channel for the current group, or nil if solo.
+function Util.GetGroupChannel()
+    if IsInRaid and IsInRaid() then return "RAID" end
+    if IsInGroup and (IsInGroup() or IsInGroup(2)) then return "PARTY" end
+    return nil
+end
+
+--- Returns the unit prefix ("raid" or "party") and max count for iterating group members.
+function Util.GetGroupUnitInfo()
+    if IsInRaid and IsInRaid() then
+        return "raid", 40
+    else
+        return "party", 4
+    end
+end
+
+------------------------------------------------------------------------
+-- Formatting helpers
+------------------------------------------------------------------------
+
 --- Format seconds into "M:SS" string
 ---@param sec number
 ---@return string
@@ -288,19 +326,19 @@ local INTERRUPT_CLASSES = {
 function Util.ScanGroupComposition()
     local result = { dispellers = {}, kickers = {}, healers = {}, isRaid = false }
 
-    local inRaid = IsInRaid and IsInRaid()
-    result.isRaid = inRaid and true or false
+    result.isRaid = Util.IsInRaid()
 
     local units = {}
-    if inRaid then
-        for i = 1, 40 do
-            local unit = "raid" .. i
+    local prefix, maxCount = Util.GetGroupUnitInfo()
+    if result.isRaid then
+        for i = 1, maxCount do
+            local unit = prefix .. i
             if UnitExists(unit) then table.insert(units, unit) end
         end
     else
         table.insert(units, "player")
-        for i = 1, 4 do
-            local unit = "party" .. i
+        for i = 1, maxCount do
+            local unit = prefix .. i
             if UnitExists(unit) then table.insert(units, unit) end
         end
     end

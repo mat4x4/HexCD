@@ -151,12 +151,12 @@ local function ProcessCorrelation()
     local castCount = 0
     for _ in pairs(pendingCasts) do castCount = castCount + 1 end
 
-    Log:Log("DEBUG", string.format("KickCorrel: processing — %d casts, %d interrupts", castCount, interruptCount))
-
     if interruptCount == 0 then
         wipe(pendingCasts)
         return
     end
+
+    Log:Log("DEBUG", string.format("KickCorrel: processing — %d casts, %d interrupts", castCount, interruptCount))
 
     -- Multiple simultaneous interrupts = AoE CC, not a kick
     if interruptCount > 1 then
@@ -477,10 +477,11 @@ function KT:RebuildGroupMapping()
     wipe(groupUnits)
     wipe(rotationUnitMap)
 
+    local Util = HexCD.Util
     local prefix, count
-    if IsInRaid() then
+    if Util.IsInRaid() then
         prefix, count = "raid", GetNumGroupMembers()
-    elseif IsInGroup() then
+    elseif Util.IsInAnyGroup() then
         prefix, count = "party", GetNumGroupMembers() - 1
         groupUnits["player"] = true
     else
@@ -734,10 +735,7 @@ end
 ------------------------------------------------------------------------
 
 local function GetAddonChannel()
-    if IsInRaid() then return "RAID"
-    elseif IsInGroup() then return "PARTY"
-    end
-    return nil
+    return HexCD.Util.GetGroupChannel()
 end
 
 local function BroadcastKickCast(casterName, spellID, groupIdx)
@@ -756,8 +754,9 @@ local function BroadcastKickCast(casterName, spellID, groupIdx)
     end
 
     -- Fallback: whisper each member individually (when PARTY/RAID blocked in instances)
+    local unitPrefix = HexCD.Util.GetGroupUnitInfo()
     for i = 1, GetNumGroupMembers() do
-        local unit = (IsInRaid() and "raid" or "party") .. i
+        local unit = unitPrefix .. i
         if UnitExists(unit) then
             local name, realm = UnitName(unit)
             local target = realm and realm ~= "" and (name .. "-" .. realm) or name
@@ -948,7 +947,7 @@ end)
 --- Auto-enroll kickers based on group composition.
 --- Party: all tanks + DPS with interrupts. Raid: no auto-enrollment.
 function KT:AutoEnroll()
-    if not IsInGroup() then return end
+    if not HexCD.Util.IsInAnyGroup() then return end
 
     local comp = Util.ScanGroupComposition()
 
