@@ -461,16 +461,17 @@ end
 local logFrame = nil
 
 local function CreateLogFrame()
-    local f = CreateFrame("Frame", "HexCDLogFrame", UIParent, "BackdropTemplate")
+    local f = CreateFrame("Frame", "HexCDTrackerLogFrame", UIParent, "BackdropTemplate")
     f:SetSize(700, 450)
-    f:SetPoint("CENTER")
+    f:SetPoint("CENTER", -360, 0)
     f:SetBackdrop({
         bgFile = "Interface\\DialogFrame\\UI-DialogBox-Background-Dark",
         edgeFile = "Interface\\DialogFrame\\UI-DialogBox-Border",
         edgeSize = 16,
         insets = { left = 4, right = 4, top = 4, bottom = 4 },
     })
-    f:SetBackdropColor(0, 0, 0, 0.9)
+    f:SetBackdropColor(0.0, 0.02, 0.08, 0.95)
+    f:SetBackdropBorderColor(0.3, 0.5, 0.8, 0.8)
     f:SetMovable(true)
     f:EnableMouse(true)
     f:RegisterForDrag("LeftButton")
@@ -478,10 +479,10 @@ local function CreateLogFrame()
     f:SetScript("OnDragStop", f.StopMovingOrSizing)
     f:SetFrameStrata("DIALOG")
 
-    -- Title
+    -- Title (blue tint — tracker/CD log)
     local title = f:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
     title:SetPoint("TOP", 0, -10)
-    title:SetText("HexCD Debug Log")
+    title:SetText("|cFF4488CCHexCD|r |cFFAAAAAATracker Log|r")
 
     -- Close button
     local close = CreateFrame("Button", nil, f, "UIPanelCloseButton")

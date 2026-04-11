@@ -74,6 +74,7 @@ local RULES = {
     },
     MONK = {
         { BuffDuration = 15, Cooldown = 180, SpellId = 115203, Evidence = "Cast" },  -- Fortifying Brew
+        { BuffDuration = 25, Cooldown = 45,  SpellId = 322507, Evidence = {"Cast", "Shield"}, MinDuration = true },  -- Celestial Brew (Brewmaster, absorb shield)
     },
     DEMONHUNTER = {
         { BuffDuration = 10, Cooldown = 60,  SpellId = 198589, Evidence = "Cast" },  -- Blur
@@ -89,6 +90,7 @@ local RULES = {
     EVOKER = {
         { BuffDuration = 12, Cooldown = 150, SpellId = 363916, Evidence = "Cast" },  -- Obsidian Scales
         { BuffDuration = 8,  Cooldown = 120, SpellId = 374227, Evidence = "Cast" },  -- Zephyr
+        { BuffDuration = 4,  Cooldown = 90,  SpellId = 374349, Evidence = "Cast", MinDuration = true },  -- Renewing Blaze (initial, varies by talent)
     },
 }
 
@@ -315,22 +317,45 @@ end
 -- Event handling
 ------------------------------------------------------------------------
 
+local auraEventOnce = {}  -- unit → true (log first UNIT_AURA per unit per combat)
+
+local function IsPartyUnit(unit)
+    return unit == "party1" or unit == "party2" or unit == "party3" or unit == "party4"
+end
+
 local function OnEvent(self, event, ...)
     if event == "UNIT_AURA" then
         local unit = ...
+        if not IsPartyUnit(unit) then return end
+        -- Trace: confirm UNIT_AURA fires for each party member
+        if not auraEventOnce[unit] and Log then
+            auraEventOnce[unit] = true
+            local uname = "?"
+            pcall(function()
+                local n = UnitName(unit)
+                if n and not (issecretvalue and issecretvalue(n)) then uname = n end
+            end)
+            Log:Log("DEBUG", string.format("AuraDetector: UNIT_AURA first fire for %s (%s)", unit, uname))
+        end
         ProcessAuraChanges(unit)
 
     elseif event == "UNIT_SPELLCAST_SUCCEEDED" then
         local unit = ...
-        lastCastTime[unit] = GetTime()
+        if IsPartyUnit(unit) then
+            lastCastTime[unit] = GetTime()
+        end
 
     elseif event == "UNIT_ABSORB_AMOUNT_CHANGED" then
         local unit = ...
-        lastShieldTime[unit] = GetTime()
+        if IsPartyUnit(unit) then
+            lastShieldTime[unit] = GetTime()
+        end
 
     elseif event == "UNIT_FLAGS" then
         local unit = ...
-        lastFlagsTime[unit] = GetTime()
+        if IsPartyUnit(unit) then
+            lastFlagsTime[unit] = GetTime()
+        end
 
     elseif event == "GROUP_ROSTER_UPDATE" then
         AD:RegisterPartyUnits()
@@ -359,13 +384,27 @@ function AD:RegisterPartyUnits()
     eventFrame:RegisterEvent("GROUP_ROSTER_UPDATE")
     eventFrame:RegisterEvent("UNIT_ABSORB_AMOUNT_CHANGED")
 
-    for i = 1, 4 do
-        local uid = "party" .. i
-        if UnitExists(uid) then
-            eventFrame:RegisterUnitEvent("UNIT_AURA", uid)
-            eventFrame:RegisterUnitEvent("UNIT_SPELLCAST_SUCCEEDED", uid)
-            eventFrame:RegisterUnitEvent("UNIT_FLAGS", uid)
+    -- Use global event registration — RegisterUnitEvent only supports 1-2 units
+    -- per call and replaces previous registrations on the same frame.
+    -- We filter by unit token in the event handler instead.
+    eventFrame:RegisterEvent("UNIT_AURA")
+    eventFrame:RegisterEvent("UNIT_SPELLCAST_SUCCEEDED")
+    eventFrame:RegisterEvent("UNIT_FLAGS")
+
+    if Log then
+        local names = {}
+        for i = 1, 4 do
+            local uid = "party" .. i
+            if UnitExists(uid) then
+                local name = "?"
+                pcall(function()
+                    local n = UnitName(uid)
+                    if n and not (issecretvalue and issecretvalue(n)) then name = n end
+                end)
+                names[#names + 1] = uid .. "=" .. name
+            end
         end
+        Log:Log("DEBUG", "AuraDetector: registered global events, party: " .. (#names > 0 and table.concat(names, ", ") or "none"))
     end
 end
 
@@ -394,4 +433,5 @@ function AD:Reset()
     wipe(lastShieldTime)
     wipe(lastFlagsTime)
     wipe(filterDiagOnce)
+    wipe(auraEventOnce)
 end

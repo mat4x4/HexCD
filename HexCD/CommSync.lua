@@ -292,7 +292,7 @@ local function OnAddonMessage(prefix, msg, channel, sender)
                 if not theirClass then return end
                 local count = 0
                 for spellID, info in pairs(DB:GetAllSpells()) do
-                    if info.class == theirClass and info.category == "PERSONAL" then
+                    if info.class == theirClass then
                         if not partyCD[name][spellID] then
                             partyCD[name][spellID] = { readyTime = 0, effectiveCD = info.cd, castTime = 0 }
                             count = count + 1
@@ -300,7 +300,7 @@ local function OnAddonMessage(prefix, msg, channel, sender)
                     end
                 end
                 if count > 0 then
-                    Log:Log("DEBUG", string.format("CommSync: pre-populated %d PERSONAL spells for %s (%s)", count, name, theirClass))
+                    Log:Log("DEBUG", string.format("CommSync: pre-populated %d spells for %s (%s)", count, name, theirClass))
                 end
             end)
 
@@ -390,6 +390,8 @@ local function OnEvent(self, event, ...)
         -- Layer 4: addon comms (CDCAST) handled separately in OnAddonMessage
         local isPartyUnit = (unit == "party1" or unit == "party2" or unit == "party3" or unit == "party4")
         if isPartyUnit then
+            -- Safe trace: only use clean values to avoid taint in log
+            Log:Log("DEBUG", "Layer2+3: UNIT_SPELLCAST_SUCCEEDED for " .. unit)
             pcall(function()
                 local n = UnitName(unit)
                 if not n or (issecretvalue and issecretvalue(n)) then return end
@@ -422,8 +424,8 @@ local function OnEvent(self, event, ...)
                     return
                 end
 
-                if info.category ~= "PERSONAL" then
-                    -- Non-personal spell (kick, heal, CC etc.) — handled by other trackers
+                -- Skip kicks and dispels — those have their own dedicated trackers
+                if info.category == "KICK" or info.category == "DISPEL" then
                     return
                 end
 
@@ -561,7 +563,9 @@ end
 -- Party auto-discovery (works without CDHELLO — uses UnitClass)
 ------------------------------------------------------------------------
 
---- Pre-populate PERSONAL category spells for a unit as "ready".
+--- Pre-populate ALL tracked spells for a unit as "ready".
+--- Covers PERSONAL, EXTERNAL_DEFENSIVE, UTILITY, HEALING, CC, KICK, DISPEL
+--- so all detection layers can find the spell in partyCD when it fires.
 --- @param unitID string e.g. "player", "party1"
 --- @param name string Player name (stripped of realm)
 PrePopulatePersonalCDs = function(unitID, name)
@@ -577,7 +581,7 @@ PrePopulatePersonalCDs = function(unitID, name)
         partyCD[name] = partyCD[name] or {}
         local count = 0
         for spellID, info in pairs(DB:GetAllSpells()) do
-            if info.class == unitClass and info.category == "PERSONAL" then
+            if info.class == unitClass then
                 if not partyCD[name][spellID] then
                     partyCD[name][spellID] = {
                         readyTime = 0,
@@ -589,7 +593,7 @@ PrePopulatePersonalCDs = function(unitID, name)
             end
         end
         if count > 0 then
-            Log:Log("DEBUG", string.format("CommSync: pre-populated %d PERSONAL spells for %s (%s)", count, name, unitClass))
+            Log:Log("DEBUG", string.format("CommSync: pre-populated %d spells for %s (%s)", count, name, unitClass))
         end
     end)
 end

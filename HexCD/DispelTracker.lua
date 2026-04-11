@@ -650,10 +650,7 @@ function DT:CheckAlert()
 
     -- Only alert if CD is ready
     local ready, remaining = IsDispellerReady(activeIdx)
-    if not ready then
-        Log:Log("DEBUG", string.format("DispelTracker: alert skipped — CD not ready (%.1fs remaining)", remaining))
-        return
-    end
+    if not ready then return end
 
     -- Only alert if someone actually has a dispellable debuff
     local hasDebuff, debuffUnit = AnyDispellableDebuff()
