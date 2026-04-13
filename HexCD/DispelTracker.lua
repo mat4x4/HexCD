@@ -38,6 +38,23 @@ local function StripRealm(name)
     return name:match("^([^-]+)") or name
 end
 
+------------------------------------------------------------------------
+-- Taint laundering (same technique as KickTracker)
+-- UNIT_SPELLCAST_SUCCEEDED spellID for party members is secret in Midnight.
+-- StatusBar.SetValue unwraps it to a clean number.
+------------------------------------------------------------------------
+local dispelLaunderBar = CreateFrame("StatusBar")
+dispelLaunderBar:SetMinMaxValues(0, 9999999)
+local _dispelLaunderedID = nil
+dispelLaunderBar:SetScript("OnValueChanged", function(_, v) _dispelLaunderedID = v end)
+
+local function LaunderDispelSpellID(spellID)
+    _dispelLaunderedID = nil
+    dispelLaunderBar:SetValue(0)
+    pcall(dispelLaunderBar.SetValue, dispelLaunderBar, spellID)
+    return _dispelLaunderedID
+end
+
 local DISPELLER_BAR_POOL_SIZE = 6
 local DEBUFF_ENTRY_POOL_SIZE = 8
 local INACTIVE_FADE_SEC = 3
@@ -365,12 +382,18 @@ local function ScanUnitAuras(unit)
             pcall(function() if not issecretvalue(aura.name) then auraName = aura.name end end)
             local dispelType = "Magic"
             pcall(function() if not issecretvalue(aura.dispelName) then dispelType = aura.dispelName end end)
-            unitDebuffs[aura.auraInstanceID] = {
-                name = auraName,
-                dispelType = dispelType,
-                expirationTime = aura.expirationTime or 0,
-                duration = aura.duration or 0,
-            }
+            local aid = aura.auraInstanceID
+            -- Guard against secret-value instance IDs (Midnight sandbox can
+            -- return secret values that throw "table index is secret" when
+            -- used as a map key). Skip such auras entirely.
+            if aid and not (issecretvalue and issecretvalue(aid)) then
+                unitDebuffs[aid] = {
+                    name = auraName,
+                    dispelType = dispelType,
+                    expirationTime = aura.expirationTime or 0,
+                    duration = aura.duration or 0,
+                }
+            end
         end
     end
 end
@@ -463,12 +486,14 @@ function DT:UpdateDisplay()
             gs.anchorFrame:Show()
 
             local activeIdx = gs.currentIdx
-            local nextName = (activeIdx and gs.rotation[activeIdx]) and gs.rotation[activeIdx].name or "?"
+            local nextEntry = activeIdx and gs.rotation[activeIdx] or nil
+            local nextName = (nextEntry and nextEntry.name) or "?"
+            local coloredNext = HexCD.Util.ColorNameByClass(nextName, nextEntry and nextEntry.class)
             local groupTag = gi > 1 and (" G" .. gi) or ""
             if totalDebuffCount > 0 and gi == debuffGroupIdx then
-                gs.headerText:SetText("|cFFCC88FFDISPEL" .. groupTag .. "|r  |cFFFFCC00" .. nextName .. "'s turn|r  |cFFFF8800[" .. totalDebuffCount .. "]|r")
+                gs.headerText:SetText("|cFFCC88FFDISPEL" .. groupTag .. "|r  " .. coloredNext .. "|cFFFFCC00's turn|r  |cFFFF8800[" .. totalDebuffCount .. "]|r")
             else
-                gs.headerText:SetText("|cFFCC88FFDISPEL" .. groupTag .. "|r  |cFFFFCC00" .. nextName .. "'s turn|r")
+                gs.headerText:SetText("|cFFCC88FFDISPEL" .. groupTag .. "|r  " .. coloredNext .. "|cFFFFCC00's turn|r")
             end
 
             local HEADER_HEIGHT = 20
@@ -504,7 +529,8 @@ function DT:UpdateDisplay()
                         yPos = yPos - BAR_SPACING
 
                         local dispelSpellName = entry.dispelName or (entry.class and DISPEL_SPELLS[entry.class] and DISPEL_SPELLS[entry.class].name) or "Dispel"
-                        bar.nameText:SetText(string.format("|cFFFFFFFF%d|r  %s |cFF888888(%s)|r", i, entry.name or "?", dispelSpellName))
+                        local coloredName = HexCD.Util.ColorNameByClass(entry.name or "?", entry.class)
+                        bar.nameText:SetText(string.format("|cFFFFFFFF%d|r  %s |cFF888888(%s)|r", i, coloredName, dispelSpellName))
 
                         if ready then
                             bar.cdText:SetText("|cFF00FF00OK|r")
@@ -861,15 +887,51 @@ eventFrame:SetScript("OnEvent", function(self, event, ...)
 
     elseif event == "UNIT_SPELLCAST_SUCCEEDED" then
         local unit, _, spellID = ...
-        -- Only handle player's own casts (UNIT_SPELLCAST_SUCCEEDED doesn't
-        -- fire reliably for other group members). Other players' dispels
-        -- arrive via CHAT_MSG_ADDON from their HexCD instance.
-        if unit == "player" and DISPEL_SPELL_IDS[spellID] then
-            local playerName = UnitName("player")
-            ResolveMyGroup()
-            local gi = myGroupIdx or 1
-            HandleDispelByName(playerName, spellID, gi)
-            BroadcastDispelCast(playerName, spellID, gi)
+
+        if unit == "player" then
+            -- Local player: direct spellID access (always clean for self)
+            if DISPEL_SPELL_IDS[spellID] then
+                local playerName = UnitName("player")
+                ResolveMyGroup()
+                local gi = myGroupIdx or 1
+                HandleDispelByName(playerName, spellID, gi)
+                BroadcastDispelCast(playerName, spellID, gi)
+            end
+        else
+            -- Party member: try direct then launder (Midnight secret values)
+            local isParty = (unit == "party1" or unit == "party2" or unit == "party3" or unit == "party4")
+            if isParty then
+                pcall(function()
+                    local cleanID = nil
+                    -- Try direct
+                    if not (issecretvalue and issecretvalue(spellID)) and type(spellID) == "number" then
+                        cleanID = spellID
+                    end
+                    -- Try laundering
+                    if not cleanID then
+                        cleanID = LaunderDispelSpellID(spellID)
+                    end
+                    if not cleanID then return end
+
+                    if DISPEL_SPELL_IDS[cleanID] then
+                        local casterName = UnitName(unit)
+                        if not casterName or (issecretvalue and issecretvalue(casterName)) then return end
+                        casterName = StripRealm(casterName)
+
+                        -- Find which group this caster is in
+                        local gi = 1
+                        for gIdx = 1, MAX_GROUPS do
+                            for _, entry in ipairs(groups[gIdx].rotation) do
+                                if entry.name == casterName then gi = gIdx; break end
+                            end
+                        end
+
+                        Log:Log("DEBUG", string.format("DispelTracker: %s dispelled (spell %d) via laundering [layer3]",
+                            casterName, cleanID))
+                        HandleDispelByName(casterName, cleanID, gi)
+                    end
+                end)
+            end
         end
 
     elseif event == "PLAYER_REGEN_DISABLED" then
@@ -903,7 +965,22 @@ function DT:AutoEnroll()
     if not HexCD.Util.IsInAnyGroup() then return end
 
     local comp = Util.ScanGroupComposition()
-    if #comp.dispellers == 0 then return end
+    -- If the current group has no dispellers (follower dungeon, solo,
+    -- all-DPS group), clear the rotation rather than leave ghosts from
+    -- a previous key. Matches KickTracker's AutoEnroll behavior.
+    if #comp.dispellers == 0 then
+        local currentNames = self:GetRotationNames(1)
+        if #currentNames > 0 then
+            groups[1].rotation = {}
+            groups[1].currentIdx = 1
+            wipe(groups[1].cdState)
+            dispelRotation = groups[1].rotation
+            Config:Set("dispelRotation", {})
+            Log:Log("INFO", "DispelTracker: cleared stale rotation (no dispellers in current group)")
+            DT:RebuildGroupMapping()
+        end
+        return
+    end
 
     -- Build set of current group members
     local groupMemberSet = {}
@@ -925,19 +1002,46 @@ function DT:AutoEnroll()
         end
     end
 
-    -- Check if group 1 rotation is stale
+    -- Stale in either direction:
+    --   (a) rotation has a name no longer a valid dispeller (left group
+    --       or respecced from healer), OR
+    --   (b) current group has a dispeller not yet in the rotation.
     local currentNames = self:GetRotationNames(1)
+    local dispellerSet = {}
+    for _, n in ipairs(comp.dispellers) do dispellerSet[n] = true end
+    local rotationSet = {}
+    for _, n in ipairs(currentNames) do rotationSet[n] = true end
+
     local stale = (#currentNames == 0)
     if not stale then
         for _, n in ipairs(currentNames) do
-            if not groupMemberSet[n] then stale = true; break end
+            if not groupMemberSet[n] or not dispellerSet[n] then
+                stale = true; break
+            end
+        end
+    end
+    if not stale then
+        for _, n in ipairs(comp.dispellers) do
+            if not rotationSet[n] then
+                stale = true; break
+            end
         end
     end
 
     if stale then
-
-        DT:SetRotation(comp.dispellers, 1)
-        Log:Log("INFO", "DispelTracker: auto-enrolled " .. #comp.dispellers .. " dispellers")
+        -- Cap auto-enroll at 5 to keep the bar readable in raid contexts.
+        local MAX_AUTO_ENROLL = 5
+        local sorted = {}
+        for _, n in ipairs(comp.dispellers) do table.insert(sorted, n) end
+        if #sorted > MAX_AUTO_ENROLL then
+            local trimmed = {}
+            for i = 1, MAX_AUTO_ENROLL do trimmed[i] = sorted[i] end
+            sorted = trimmed
+        end
+        DT:SetRotation(sorted, 1)
+        Log:Log("INFO", string.format(
+            "DispelTracker: auto-enrolled %d dispellers%s",
+            #sorted, comp.isRaid and " (raid)" or ""))
     end
 end
 

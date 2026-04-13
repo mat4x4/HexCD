@@ -35,11 +35,12 @@ local BAR_NAME_WIDTH = 55
 local ANCHORED_CATEGORIES = { PERSONAL = true }
 
 -- Categories that get their own floating bar
-local FLOATING_CATEGORIES = { "EXTERNAL_DEFENSIVE", "UTILITY", "HEALING", "CC" }
+local FLOATING_CATEGORIES = { "EXTERNAL_DEFENSIVE", "UTILITY", "HEALING", "OFFENSIVE", "CC" }
 local FLOATING_TITLES = {
     EXTERNAL_DEFENSIVE = "|cFF44CC44External Defensives|r",
     UTILITY            = "|cFF88AACCUtility|r",
     HEALING            = "|cFF4488CCHealing CDs|r",
+    OFFENSIVE          = "|cFFFF8844Offensive CDs|r",
     CC                 = "|cFFCC44CCCrowd Control|r",
 }
 
@@ -405,10 +406,14 @@ local function UpdatePersonalBars(partyCD, now)
     for playerName, pData in pairs(partyCD) do
         if type(pData) == "table" then
             local spells = {}
+            local pSpec = pData._specID
             for spellID, state in pairs(pData) do
                 if type(spellID) == "number" and type(state) == "table" and IsSpellEnabled(spellID) then
                     local dbInfo = HexCD.SpellDB and HexCD.SpellDB:GetSpell(spellID)
-                    if dbInfo and dbInfo.category == "PERSONAL" then
+                    -- Resolve category honouring per-spec override (e.g.
+                    -- Avenging Wrath routes to HEALING on Holy Paladin).
+                    local effCat = dbInfo and HexCD.SpellDB:GetCategory(spellID, pSpec)
+                    if dbInfo and effCat == "PERSONAL" then
                         local remaining = math.max(0, state.readyTime - now)
                         -- hideReady: skip spells that are off cooldown
                         if not hideReady or remaining > 0 then
@@ -549,7 +554,8 @@ local function CreateFloatingBar(category)
             EXTERNAL_DEFENSIVE = { "TOPRIGHT", -200, -100 },
             UTILITY            = { "TOPRIGHT", -200, -200 },
             HEALING            = { "TOPRIGHT", -200, -300 },
-            CC                 = { "TOPRIGHT", -200, -400 },
+            OFFENSIVE          = { "TOPRIGHT", -200, -400 },
+            CC                 = { "TOPRIGHT", -200, -500 },
         }
         local d = defaults[category] or { "CENTER", 0, 0 }
         f:SetPoint(d[1], UIParent, d[1], d[2], d[3])
@@ -599,17 +605,21 @@ local function UpdateFloatingBar(category, partyCD, now)
     for playerName, pData in pairs(partyCD) do
         if type(pData) == "table" then
             local spells = {}
+            local pSpec = pData._specID
             for spellID, state in pairs(pData) do
                 if type(spellID) == "number" and type(state) == "table" and IsSpellEnabled(spellID) then
                     local dbInfo = HexCD.SpellDB and HexCD.SpellDB:GetSpell(spellID)
-                    if dbInfo and dbInfo.category == category then
+                    -- Honour per-spec categoryOverride (e.g. Avenging Wrath
+                    -- → OFFENSIVE for Ret/Prot, HEALING for Holy).
+                    local effCat = dbInfo and HexCD.SpellDB:GetCategory(spellID, pSpec)
+                    if dbInfo and effCat == category then
                         table.insert(spells, { id = spellID, state = state })
                     end
                 end
             end
             if #spells > 0 then
                 table.sort(spells, function(a, b) return a.id < b.id end)
-                table.insert(players, { name = playerName, spells = spells })
+                table.insert(players, { name = playerName, class = pData._class, spells = spells })
             end
         end
     end
@@ -626,7 +636,17 @@ local function UpdateFloatingBar(category, partyCD, now)
         if rowIdx >= MAX_PLAYERS then break end
         rowIdx = rowIdx + 1
         local row = bar.rows[rowIdx]
-        row.nameText:SetText(p.name)
+        -- Fallback: resolve class from SpellDB if CommSync didn't stash one
+        -- (can happen in legacy paths or when UnitClass returned a
+        -- secretvalue during pre-pop). Use the first spell's class.
+        local classToken = p.class
+        if not classToken and p.spells[1] then
+            local dbInfo = HexCD.SpellDB and HexCD.SpellDB:GetSpell(p.spells[1].id)
+            classToken = dbInfo and dbInfo.class
+        end
+        local coloredName = (HexCD.Util and HexCD.Util.ColorNameByClass
+            and HexCD.Util.ColorNameByClass(p.name, classToken)) or p.name
+        row.nameText:SetText(coloredName)
         row:Show()
 
         local iconIdx = 0
@@ -681,10 +701,14 @@ local function UpdateDisplay()
             pcdGroupDebugOnce = false
             local Log = HexCD.DebugLog
             if Log then
-                Log:Log("DEBUG", "PartyCDDisplay: NOT in group — hiding personal bars")
+                Log:Log("DEBUG", "PartyCDDisplay: NOT in group — hiding personal and floating bars")
             end
         end
         for _, bar in pairs(personalBars) do bar.container:Hide() end
+        -- Hide floating bars too (unless user is positioning them)
+        for _, bar in pairs(floatingBars) do
+            if not bar._unlocked then bar:Hide() end
+        end
         return
     end
     local partyCD = CS:GetPartyCD()

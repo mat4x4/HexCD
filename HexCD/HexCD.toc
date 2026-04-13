@@ -10,10 +10,15 @@ Util.lua
 DebugLog.lua
 Config.lua
 SpellDB.lua
+SpecCache.lua
 CooldownTracker.lua
 DispelTracker.lua
 KickTracker.lua
 CommSync.lua
+AuraRules.lua
+TalentDefaults.lua
+DurationModifiers.lua
+TalentCache.lua
 AuraDetector.lua
 PartyCDDisplay.lua
 ConfigGUI.lua

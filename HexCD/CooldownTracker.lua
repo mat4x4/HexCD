@@ -27,11 +27,11 @@ local SPELL_ALIASES = {
 
 local SPEC_CDS = {
     ["Druid:Restoration"] = {
-        [391528] = { name = "Convoke the Spirits", cd = 60 },   -- 60s with Cenarius' Guidance
+        [391528] = { name = "Convoke the Spirits", cd = 120 },  -- 120s base; Cenarius' Guidance talent reduces to 60s (handled via DurationModifiers on live-player detection)
         [740]    = { name = "Tranquility",         cd = 180 },
         [33891]  = { name = "Incarnation: ToL",    cd = 180 },
-        [132158] = { name = "Nature's Swiftness",  cd = 60 },
-        [197721] = { name = "Flourish",            cd = 90 },   -- if talented
+        -- Nature's Swiftness (132158) removed — it's a cast-time modifier,
+        -- not a healing throughput CD worth tracking on the healing bar.
     },
     ["Evoker:Preservation"] = {
         [363534] = { name = "Rewind",          cd = 240 },
@@ -161,14 +161,41 @@ function CT:OnSpellCast(spellID, source)
             "CooldownTracker: C_Spell.GetSpellCooldown returned %.1fs for %s (base=%ds)",
             actualCD, info.name, info.cd))
     else
+        -- Talent-based CD adjustment via DurationModifiers — catches static
+        -- reductions like Cenarius' Guidance (-50% Convoke) on the FIRST cast,
+        -- before we have any observed-interval data to learn from. Uses
+        -- TalentCache for the local player.
+        local DM = HexCD.DurationModifiers
+        local TC = HexCD.TalentCache
+        if DM and TC and UnitClass and GetSpecialization then
+            local _, classToken = UnitClass("player")
+            local specIdx = GetSpecialization()
+            local specID = nil
+            if specIdx and GetSpecializationInfo then
+                specID = select(1, GetSpecializationInfo(specIdx))
+            end
+            local talents = TC.GetTalentsForUnit and TC:GetTalentsForUnit("player") or nil
+            if classToken and talents then
+                local adjusted = DM:AdjustCooldown(classToken, specID, talents, spellID, info.cd, nil)
+                if adjusted and adjusted < info.cd then
+                    actualCD = adjusted
+                    Log:Log("DEBUG", string.format(
+                        "CooldownTracker: talent-adjusted CD for %s = %ds via DurationModifiers (base=%ds)",
+                        info.name, actualCD, info.cd))
+                end
+            end
+        end
+
         -- Heuristic: if we've seen this spell before, check if haste reduced the CD.
         -- Observed interval is always >= actual CD (player may hold the spell),
         -- so it can only tell us the CD is *shorter* than base, never longer.
+        -- Use `actualCD` (post-talent-adjust) as the baseline for learning so
+        -- haste further reducing a talent-reduced CD is still caught.
         local prev = cdState[spellID]
         if prev and prev.lastCastTime then
             local observed = now - prev.lastCastTime
-            -- Only learn if observed < base (haste/CDR shortened it) and > 50% base (sanity)
-            if observed > info.cd * 0.5 and observed < info.cd then
+            -- Only learn if observed < current and > 50% current (sanity)
+            if observed > actualCD * 0.5 and observed < actualCD then
                 actualCD = math.floor(observed + 0.5)
                 Log:Log("DEBUG", string.format(
                     "CooldownTracker: learned CD for %s = %ds (haste-reduced, base=%ds)",

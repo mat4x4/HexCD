@@ -1,14 +1,16 @@
 ------------------------------------------------------------------------
--- HexCD: CommSync — Party CD Sync Protocol
+-- HexCD: CommSync — Party CD State Manager
 --
--- Each client tracks its own CDs locally and broadcasts to the group.
--- Other clients interpolate remaining time. Protocol:
+-- Manages partyCD state (who has what CDs, when they're ready).
+-- Detection is handled by:
+--   Layer 1: AuraDetector (UNIT_AURA state machine) — primary in M+
+--   Layer 2/3: UNIT_SPELLCAST_SUCCEEDED + taint laundering — this file
+--   Layer 4: Addon comms (REMOVED — blocked by Midnight 12.0 lockdown)
 --
---   CDHELLO:<name>:<spec>              — On group join / reload
---   CDCAST:<name>:<spellID>:<cd>       — On own cast detected
---   CDSTATE:<name>:<sid>:<rem>,...     — On combat end (reconciliation)
---
--- Consumers: future PartyCDDisplay, DispelTracker/KickTracker integration.
+-- Midnight 12.0 blocks SendAddonMessage during M+ keys (entire run)
+-- and raid encounters (per-pull). CDHELLO/CDCAST/CDSTATE protocol
+-- was removed because it can't deliver messages when needed most.
+-- Party discovery uses UnitClass-based ScanAndPopulateParty instead.
 ------------------------------------------------------------------------
 HexCD = HexCD or {}
 HexCD.CommSync = {}
@@ -24,20 +26,12 @@ local PrePopulatePersonalCDs
 ------------------------------------------------------------------------
 -- Constants
 ------------------------------------------------------------------------
-local ADDON_MSG_PREFIX = "HexCD"
-
--- SpellDB provides the tracked spell database.
--- CommSync broadcasts any spell in SpellDB when cast.
 
 ------------------------------------------------------------------------
 -- State
 ------------------------------------------------------------------------
-local commsRegistered = false
 local eventFrame = nil
-local lastHelloTime = 0
-local HELLO_DEBOUNCE = 5   -- min seconds between CDHELLO sends
 local rosterTimer = nil    -- coalesce rapid GROUP_ROSTER_UPDATE events
-local helloRetryTimer = nil -- retry timer for failed/unknown CDHELLO
 
 -- Party CD state: partyCD[playerName][spellID] = { readyTime, effectiveCD, castTime }
 -- partyCD[playerName]._spec = "specName"
@@ -45,7 +39,6 @@ local partyCD = {}
 local isTestMode = false
 
 local localPlayerName = nil
-local localSpec = nil
 
 -- Combat context (retained from Phase 1 for logging + auto-open)
 local inEncounter = false
@@ -79,10 +72,6 @@ end
 -- Helpers
 ------------------------------------------------------------------------
 
-local function GetAddonChannel()
-    return HexCD.Util.GetGroupChannel()
-end
-
 local function StripRealm(name)
     if not name then return name end
     return name:match("^([^-]+)") or name
@@ -104,268 +93,16 @@ end
 -- Send: CDHELLO
 ------------------------------------------------------------------------
 
---- Cancel any pending CDHELLO retry timer.
-local function CancelHelloRetry()
-    if helloRetryTimer then
-        helloRetryTimer:Cancel()
-        helloRetryTimer = nil
-    end
-end
+-- Addon comms (CDHELLO/CDCAST/CDSTATE) removed — blocked by Midnight 12.0 lockdown
+-- during M+ keys and raid encounters. See project_midnight_addon_comms.md for details.
 
---- Schedule a CDHELLO retry after `delaySec` seconds.
-local function ScheduleHelloRetry(delaySec, reason)
-    CancelHelloRetry()
-    helloRetryTimer = C_Timer.NewTimer(delaySec, function()
-        helloRetryTimer = nil
-        lastHelloTime = 0  -- clear debounce so the retry goes through
-        SendCDHello()
-    end)
-    Log:Log("DEBUG", "CommSync: CDHELLO retry in " .. delaySec .. "s (" .. reason .. ")")
-end
-
-function SendCDHello()
-    if not commsRegistered then return end
-
-    -- Debounce: don't spam CDHELLO
-    local now = GetTime()
-    if now - lastHelloTime < HELLO_DEBOUNCE then return end
-
-    local channel = GetAddonChannel()
-    if not channel then
-        -- No channel yet (solo or APIs not ready) — retry in 3s
-        ScheduleHelloRetry(3, "no channel")
-        return
-    end
-
-    local specName = "Unknown"
-    if GetSpecialization and GetSpecializationInfo then
-        local specIdx = GetSpecialization()
-        if specIdx then
-            local _, sName = GetSpecializationInfo(specIdx)
-            if sName then specName = sName end
-        end
-    end
-    localSpec = specName
-    lastHelloTime = now
-
-    local msg = "CDHELLO:" .. (localPlayerName or "Unknown") .. ":" .. specName
-    pcall(C_ChatInfo.SendAddonMessage, ADDON_MSG_PREFIX, msg, channel)
-    Log:Log("DEBUG", "CommSync: sent CDHELLO spec=" .. specName)
-
-    -- If spec was "Unknown", GetSpecialization wasn't ready — retry in 3s
-    if specName == "Unknown" then
-        ScheduleHelloRetry(3, "spec unknown")
-    end
-end
+-- Addon message receive handler removed — see header comment.
 
 ------------------------------------------------------------------------
--- Send: CDCAST
+-- Record a local cast into partyCD
 ------------------------------------------------------------------------
 
-local function SendCDCast(spellID, effectiveCD)
-    if not commsRegistered then return end
-    local channel = GetAddonChannel()
-    if not channel then return end
-
-    local msg = "CDCAST:" .. (localPlayerName or "Unknown") .. ":" .. spellID .. ":" .. effectiveCD
-    local ok, err = pcall(C_ChatInfo.SendAddonMessage, ADDON_MSG_PREFIX, msg, channel)
-
-    local info = HexCD.SpellDB and HexCD.SpellDB:GetSpell(spellID)
-    local spellName = info and info.name or tostring(spellID)
-    if ok then
-        Log:Log("DEBUG", string.format("CommSync CDCAST sent | %s(%d) cd=%ds", spellName, spellID, effectiveCD))
-    else
-        Log:Log("ERRORS", string.format("CommSync CDCAST failed | %s | %s", spellName, tostring(err)))
-    end
-end
-
-------------------------------------------------------------------------
--- Send: CDSTATE (reconciliation on combat end)
-------------------------------------------------------------------------
-
-local function SendCDState()
-    if not commsRegistered then return end
-    local channel = GetAddonChannel()
-    if not channel then return end
-
-    local now = GetTime()
-    local myCDs = partyCD[localPlayerName]
-    if not myCDs then return end
-
-    local parts = {}
-    for spellID, state in pairs(myCDs) do
-        if type(spellID) == "number" then
-            local remaining = math.max(0, math.floor(state.readyTime - now))
-            if remaining > 0 then
-                table.insert(parts, spellID .. ":" .. remaining)
-            end
-        end
-    end
-    if #parts == 0 then return end
-
-    local msg = "CDSTATE:" .. (localPlayerName or "Unknown") .. ":" .. table.concat(parts, ",")
-    -- Respect 255-byte limit
-    if #msg > 255 then
-        -- Truncate to fit — drop trailing entries
-        while #msg > 255 and #parts > 1 do
-            table.remove(parts)
-            msg = "CDSTATE:" .. (localPlayerName or "Unknown") .. ":" .. table.concat(parts, ",")
-        end
-    end
-
-    pcall(C_ChatInfo.SendAddonMessage, ADDON_MSG_PREFIX, msg, channel)
-    Log:Log("DEBUG", string.format("CommSync CDSTATE sent | %d CDs on cooldown", #parts))
-end
-
-------------------------------------------------------------------------
--- Receive handler
-------------------------------------------------------------------------
-
-local function OnAddonMessage(prefix, msg, channel, sender)
-    if prefix ~= ADDON_MSG_PREFIX then return end
-
-    local tag = msg:match("^(%u+):")
-    if not tag then return end
-
-    -- Ignore self-echo for CDHELLO (we already set our own state locally)
-    local senderName = StripRealm(sender)
-    local isSelf = (senderName == localPlayerName)
-
-    if tag == "CDHELLO" then
-        local name, spec = msg:match("^CDHELLO:([^:]+):(.+)$")
-        if name then
-            name = StripRealm(name)
-            if name == localPlayerName then return end  -- skip self-echo entirely
-            partyCD[name] = partyCD[name] or {}
-            partyCD[name]._spec = spec
-            Log:Log("DEBUG", string.format("CommSync CDHELLO from %s spec=%s", name, spec))
-
-            -- Pre-populate their personal CDs as "ready" based on class
-            -- Resolve class from spec name (avoids name-matching issues with special chars)
-            local SPEC_TO_CLASS = {
-                -- DK
-                Blood = "DEATHKNIGHT", Frost = "DEATHKNIGHT", Unholy = "DEATHKNIGHT",
-                -- DH
-                Havoc = "DEMONHUNTER", Vengeance = "DEMONHUNTER",
-                -- Druid
-                Balance = "DRUID", Feral = "DRUID", Guardian = "DRUID", Restoration = "DRUID",
-                -- Evoker
-                Devastation = "EVOKER", Preservation = "EVOKER", Augmentation = "EVOKER",
-                -- Hunter
-                ["Beast Mastery"] = "HUNTER", Marksmanship = "HUNTER", Survival = "HUNTER",
-                -- Mage
-                Arcane = "MAGE", Fire = "MAGE", ["Frost "] = "MAGE",  -- note: "Frost" conflicts with DK
-                -- Monk
-                Brewmaster = "MONK", Mistweaver = "MONK", Windwalker = "MONK",
-                -- Paladin
-                Holy = "PALADIN", Protection = "PALADIN", Retribution = "PALADIN",
-                -- Priest
-                Discipline = "PRIEST", ["Holy "] = "PRIEST", Shadow = "PRIEST",
-                -- Rogue
-                Assassination = "ROGUE", Outlaw = "ROGUE", Subtlety = "ROGUE",
-                -- Shaman
-                Elemental = "SHAMAN", Enhancement = "SHAMAN",
-                -- Warlock
-                Affliction = "WARLOCK", Demonology = "WARLOCK", Destruction = "WARLOCK",
-                -- Warrior
-                Arms = "WARRIOR", Fury = "WARRIOR",
-            }
-            -- Handle ambiguous specs (Frost, Holy, Protection) by also checking UnitClass
-            pcall(function()
-                local DB = HexCD.SpellDB
-                if not DB or not DB.GetAllSpells then return end
-                local theirClass = SPEC_TO_CLASS[spec]
-                -- Fallback: try UnitClass if spec didn't resolve
-                if not theirClass then
-                    for i = 1, 4 do
-                        local unit = "party" .. i
-                        pcall(function()
-                            local uname = UnitName(unit)
-                            if uname and StripRealm(uname) == name then
-                                local c = select(2, UnitClass(unit))
-                                if c and not (issecretvalue and issecretvalue(c)) then theirClass = c:upper() end
-                            end
-                        end)
-                        if theirClass then break end
-                    end
-                end
-                if not theirClass then return end
-                local count = 0
-                for spellID, info in pairs(DB:GetAllSpells()) do
-                    if info.class == theirClass then
-                        if not partyCD[name][spellID] then
-                            partyCD[name][spellID] = { readyTime = 0, effectiveCD = info.cd, castTime = 0 }
-                            count = count + 1
-                        end
-                    end
-                end
-                if count > 0 then
-                    Log:Log("DEBUG", string.format("CommSync: pre-populated %d spells for %s (%s)", count, name, theirClass))
-                end
-            end)
-
-            -- Reply with our own CDHELLO so the sender discovers us too
-            -- (e.g., they just /reloaded and don't know about us yet)
-            -- Short delay + debounce prevents ping-pong loops
-            C_Timer.After(1, function() SendCDHello() end)
-        end
-
-    elseif tag == "CDCAST" then
-        local name, spellIDStr, cdStr = msg:match("^CDCAST:([^:]+):(%d+):(%d+)$")
-        if name and spellIDStr and cdStr then
-            name = StripRealm(name)
-            local spellID = tonumber(spellIDStr)
-            local effectiveCD = tonumber(cdStr)
-            local info = HexCD.SpellDB and HexCD.SpellDB:GetSpell(spellID)
-
-            -- Cross-layer dedup: skip if Layer 1/2/3 already recorded this CD
-            local ADmod = HexCD.AuraDetector
-            if ADmod and ADmod.IsDuplicate and ADmod:IsDuplicate(name, spellID) then
-                Log:Log("DEBUG", string.format("CommSync CDCAST from %s | %s(%d) cd=%ds — DEDUP [comms]",
-                    name, info and info.name or "?", spellID, effectiveCD))
-            else
-                local now = GetTime()
-                partyCD[name] = partyCD[name] or {}
-                partyCD[name][spellID] = {
-                    readyTime = now + effectiveCD,
-                    effectiveCD = effectiveCD,
-                    castTime = now,
-                }
-                Log:Log("DEBUG", string.format("CommSync CDCAST from %s | %s(%d) cd=%ds [comms]",
-                    name, info and info.name or "?", spellID, effectiveCD))
-            end
-        end
-
-    elseif tag == "CDSTATE" then
-        local name, stateCSV = msg:match("^CDSTATE:([^:]+):(.+)$")
-        if name and stateCSV then
-            name = StripRealm(name)
-            local now = GetTime()
-            partyCD[name] = partyCD[name] or {}
-            for pair in stateCSV:gmatch("([^,]+)") do
-                local sid, rem = pair:match("(%d+):(%d+)")
-                if sid and rem then
-                    local spellID = tonumber(sid)
-                    local remaining = tonumber(rem)
-                    local existing = partyCD[name][spellID]
-                    partyCD[name][spellID] = {
-                        readyTime = now + remaining,
-                        effectiveCD = existing and existing.effectiveCD or (HexCD.SpellDB and HexCD.SpellDB:GetSpell(spellID) and HexCD.SpellDB:GetSpell(spellID).cd or 0),
-                        castTime = existing and existing.castTime or nil,
-                    }
-                end
-            end
-            Log:Log("DEBUG", string.format("CommSync CDSTATE from %s | reconciled", name))
-        end
-    end
-    -- Ignore DISPEL:, KICK:, ROTATION:, KICKROTATION:, COMMSTEST: — other modules handle those
-end
-
-------------------------------------------------------------------------
--- Record a local cast into partyCD and broadcast
-------------------------------------------------------------------------
-
-local function RecordAndBroadcast(spellID, effectiveCD)
+local function RecordLocalCast(spellID, effectiveCD)
     local now = GetTime()
     partyCD[localPlayerName] = partyCD[localPlayerName] or {}
     partyCD[localPlayerName][spellID] = {
@@ -373,7 +110,6 @@ local function RecordAndBroadcast(spellID, effectiveCD)
         effectiveCD = effectiveCD,
         castTime = now,
     }
-    SendCDCast(spellID, effectiveCD)
 end
 
 ------------------------------------------------------------------------
@@ -387,11 +123,11 @@ local function OnEvent(self, event, ...)
         -- Track party member personal CD casts (partyN units only)
         -- Layer 2: direct spellID (works when not secret)
         -- Layer 3: taint laundering (StatusBar trick to unwrap secret values)
-        -- Layer 4: addon comms (CDCAST) handled separately in OnAddonMessage
-        local isPartyUnit = (unit == "party1" or unit == "party2" or unit == "party3" or unit == "party4")
+        -- Layer 4: addon comms REMOVED (blocked by Midnight 12.0 lockdown)
+        local isPartyUnit = HexCD.Util and HexCD.Util.IsOtherGroupMemberUnit
+            and HexCD.Util.IsOtherGroupMemberUnit(unit)
+            or (unit == "party1" or unit == "party2" or unit == "party3" or unit == "party4")
         if isPartyUnit then
-            -- Safe trace: only use clean values to avoid taint in log
-            Log:Log("DEBUG", "Layer2+3: UNIT_SPELLCAST_SUCCEEDED for " .. unit)
             pcall(function()
                 local n = UnitName(unit)
                 if not n or (issecretvalue and issecretvalue(n)) then return end
@@ -412,45 +148,72 @@ local function OnEvent(self, event, ...)
                     if cleanID then layer = "laundered" end
                 end
 
-                if not cleanID then
-                    Log:Log("DEBUG", string.format("Layer2+3: %s (%s) — spellID secret+launder failed, skip", unitName, unit))
-                    return
+                -- Log what laundering produced (once per unique result per unit)
+                if cleanID then
+                    local info = HexCD.SpellDB and HexCD.SpellDB:GetSpell(cleanID)
+                    Log:Log("DEBUG", string.format("Layer2+3: %s %s id=%d cat=%s [%s]",
+                        unitName, info and info.name or "unknown", cleanID,
+                        info and info.category or "untracked", layer))
+                    -- Feed the spec cache so spec-exclusive casts back-fill
+                    -- the party member's spec ID even without inspect data.
+                    if HexCD.SpecCache and HexCD.SpecCache.ObserveCast then
+                        HexCD.SpecCache:ObserveCast(unit, cleanID)
+                    end
+                else
+                    return  -- secret + launder failed
                 end
 
-                -- Check if this spell is tracked
+                -- Check if this spell is tracked. CD comes from AuraRules
+                -- (talent-adjusted when talents are known); SpellDB provides
+                -- name/category metadata and fallback CD for non-AuraRules
+                -- utility spells (BoF, Stampeding Roar, etc.).
                 local info = HexCD.SpellDB and HexCD.SpellDB:GetSpell(cleanID)
-                if not info then
-                    -- Not in SpellDB — not a tracked spell, ignore silently
+                local ADmod = HexCD.AuraDetector
+                local rule = ADmod and ADmod.GetRuleBySpellID and ADmod:GetRuleBySpellID(cleanID)
+                if not info and not rule then return end
+
+                -- Skip kicks and dispels — dedicated trackers handle them.
+                -- Category lives in SpellDB; rule-only entries are never
+                -- KICK/DISPEL by construction.
+                if info and (info.category == "KICK" or info.category == "DISPEL") then
                     return
                 end
 
-                -- Skip kicks and dispels — those have their own dedicated trackers
-                if info.category == "KICK" or info.category == "DISPEL" then
-                    return
-                end
-
-                if not partyCD[unitName][cleanID] then
-                    Log:Log("DEBUG", string.format("Layer2+3: %s %s(%d) — spell not in partyCD [%s]",
-                        unitName, info.name, cleanID, layer))
-                    return
-                end
+                if not partyCD[unitName][cleanID] then return end
 
                 -- Cross-layer dedup: skip if Layer 1 (aura) already recorded this
-                local ADmod = HexCD.AuraDetector
                 if ADmod and ADmod.IsDuplicate and ADmod:IsDuplicate(unitName, cleanID) then
                     Log:Log("DEBUG", string.format("Layer2+3: %s %s(%d) — DEDUP [%s]",
-                        unitName, info.name, cleanID, layer))
+                        unitName, (info and info.name) or "unknown", cleanID, layer))
                     return
+                end
+
+                -- Resolve effective CD: AuraRules (talent-adjusted) preferred,
+                -- SpellDB static CD as fallback.
+                local baseCD = (rule and rule.Cooldown) or (info and info.cd)
+                if not baseCD then return end
+                local effectiveCD = baseCD
+                if rule then
+                    local DM = HexCD.DurationModifiers
+                    local talents = (HexCD.TalentCache and HexCD.TalentCache.GetTalentsForUnit
+                        and HexCD.TalentCache:GetTalentsForUnit(unit)) or {}
+                    local classToken = select(2, UnitClass(unit))
+                    local specID = HexCD.SpecCache and HexCD.SpecCache.Get
+                        and HexCD.SpecCache:Get(unitName) or nil
+                    if DM and DM.AdjustCooldown then
+                        effectiveCD = DM:AdjustCooldown(classToken, specID, talents,
+                            cleanID, baseCD, 0)
+                    end
                 end
 
                 local now = GetTime()
                 partyCD[unitName][cleanID] = {
-                    readyTime = now + info.cd,
-                    effectiveCD = info.cd,
+                    readyTime = now + effectiveCD,
+                    effectiveCD = effectiveCD,
                     castTime = now,
                 }
                 Log:Log("DEBUG", string.format("Layer2+3: %s %s(%d) CD %ds [%s]",
-                    unitName, info.name, cleanID, info.cd, layer))
+                    unitName, (info and info.name) or "rule", cleanID, effectiveCD, layer))
             end)
             return
         elseif unit ~= "player" then
@@ -477,11 +240,7 @@ local function OnEvent(self, event, ...)
         end
         lastDirectCast[spellID] = now
 
-        RecordAndBroadcast(spellID, info.cd)
-
-    elseif event == "CHAT_MSG_ADDON" then
-        local prefix, msg, channel, sender = ...
-        OnAddonMessage(prefix, msg, channel, sender)
+        RecordLocalCast(spellID, info.cd)
 
     elseif event == "GROUP_ROSTER_UPDATE" then
         -- Coalesce rapid GROUP_ROSTER_UPDATE events (fires many times on group changes)
@@ -490,23 +249,65 @@ local function OnEvent(self, event, ...)
             rosterTimer = C_Timer.After(2, function()
                 rosterTimer = nil
                 ScanAndPopulateParty()
-                SendCDHello()
             end)
         end
 
     elseif event == "PLAYER_ENTERING_WORLD" then
-        -- Fires after /reload and zone transitions — APIs are fully ready here
-        -- Short delay to let group state settle
-        CancelHelloRetry()
+        -- Fires after /reload and zone transitions — APIs are fully ready
+        -- here. Re-pop both player and party: during the initial load at
+        -- ADDON_LOADED, GetSpecialization() may still return nil for the
+        -- local player, leaving spec-gated entries ungated. Doing this
+        -- again at PLAYER_ENTERING_WORLD (delayed 1s) lets the spec
+        -- resolve first, then prune off-spec leaks.
         C_Timer.After(1, function()
+            local localName = UnitName("player")
+            if localName then
+                localName = StripRealm(localName)
+                PrePopulatePersonalCDs("player", localName)
+                pcall(function() CS:PruneWrongSpec("player", localName) end)
+            end
             ScanAndPopulateParty()
-            lastHelloTime = 0  -- clear debounce so hello goes through
-            SendCDHello()
         end)
+        -- Bootstrap inMythicPlus for /reload mid-key: CHALLENGE_MODE_START
+        -- only fires when a key is started, not when PEW occurs inside an
+        -- active key. Without this, per-boss ENCOUNTER_END would auto-open
+        -- the log mid-run.
+        if C_ChallengeMode and C_ChallengeMode.GetActiveChallengeMapID then
+            local mapID = C_ChallengeMode.GetActiveChallengeMapID() or 0
+            if mapID > 0 and not inMythicPlus then
+                inMythicPlus = true
+                Log:Log("INFO", string.format(
+                    "CommSync: /reload detected inside M+ key (mapID=%d) — inMythicPlus=true",
+                    mapID))
+            end
+        end
 
     elseif event == "PLAYER_SPECIALIZATION_CHANGED" then
-        lastHelloTime = 0  -- always allow re-announce on spec change
-        SendCDHello()
+        -- Local player's spec (re-)resolved — re-pre-pop and prune
+        -- previously-created entries that don't match the new spec and
+        -- haven't been observed live (readyTime==0 → never cast).
+        local unit = ...
+        if unit == "player" then
+            local localName = GetUnitName("player", false) or UnitName("player")
+            if localName then
+                PrePopulatePersonalCDs("player", localName)
+                pcall(function() CS:PruneWrongSpec("player", localName) end)
+            end
+        end
+
+    elseif event == "INSPECT_READY" then
+        -- Party member's spec data arrived — re-pre-pop and prune
+        for i = 1, 4 do
+            local uid = "party" .. i
+            if UnitExists(uid) then
+                local n = UnitName(uid)
+                if n and not (issecretvalue and issecretvalue(n)) then
+                    n = n:match("^([^-]+)") or n
+                    PrePopulatePersonalCDs(uid, n)
+                    pcall(function() CS:PruneWrongSpec(uid, n) end)
+                end
+            end
+        end
 
     elseif event == "ENCOUNTER_START" then
         local encounterID, name = ...
@@ -518,8 +319,18 @@ local function OnEvent(self, event, ...)
         inEncounter = false
         Log:Log("INFO", "CommSync ENCOUNTER_END")
         encounterName = ""
-        -- Auto-open HexCD debug log after raid encounters (dev only)
-        if not inMythicPlus and Config:Get("autoOpenLog") then
+        -- Auto-open HexCD debug log after RAID encounters only (dev opt-in).
+        -- The `inMythicPlus` flag only flips on CHALLENGE_MODE_START, so
+        -- after a /reload mid-key we'd think we're in a raid. Use the
+        -- Blizzard API as the authoritative check too — if an M+ key is
+        -- currently active, suppress the popup (per-boss ENCOUNTER_END
+        -- mid-key would otherwise spam the log frame).
+        local activeMapID = 0
+        if C_ChallengeMode and C_ChallengeMode.GetActiveChallengeMapID then
+            activeMapID = C_ChallengeMode.GetActiveChallengeMapID() or 0
+        end
+        local inMPlusNow = inMythicPlus or (activeMapID > 0)
+        if not inMPlusNow and Config:Get("autoOpenLog") then
             C_Timer.After(2, function()
                 Log:ShowFrame()
             end)
@@ -536,8 +347,6 @@ local function OnEvent(self, event, ...)
     elseif event == "PLAYER_REGEN_ENABLED" then
         inCombat = false
         Log:Log("DEBUG", "CommSync COMBAT END")
-        -- Send reconciliation state
-        SendCDState()
 
     elseif event == "CHALLENGE_MODE_START" then
         inMythicPlus = true
@@ -568,49 +377,243 @@ end
 --- so all detection layers can find the spell in partyCD when it fires.
 --- @param unitID string e.g. "player", "party1"
 --- @param name string Player name (stripped of realm)
+--- Resolve the best-available spec ID for a unit. Delegates to SpecCache
+--- when available (adds a persistent name-realm cache that survives unit
+--- token churn and covers cross-realm members). Falls back to raw API.
+local function ResolveUnitSpecID(unitID)
+    if HexCD.SpecCache and HexCD.SpecCache.ResolveUnit then
+        return HexCD.SpecCache:ResolveUnit(unitID)
+    end
+    -- Legacy fallback (SpecCache not loaded — should never hit in live addon)
+    local specID = nil
+    pcall(function()
+        if unitID == "player" and GetSpecialization and GetSpecializationInfo then
+            local idx = GetSpecialization()
+            if idx and idx > 0 then
+                local id = GetSpecializationInfo(idx)
+                if id and id ~= 0 and not (issecretvalue and issecretvalue(id)) then
+                    specID = id
+                end
+            end
+        elseif GetInspectSpecialization then
+            local id = GetInspectSpecialization(unitID)
+            if id and id ~= 0 and not (issecretvalue and issecretvalue(id)) then
+                specID = id
+            end
+        end
+    end)
+    return specID
+end
+
 PrePopulatePersonalCDs = function(unitID, name)
     pcall(function()
-        local DB = HexCD.SpellDB
-        if not DB or not DB.GetAllSpells then return end
         local unitClass = select(2, UnitClass(unitID))
         if not unitClass or (issecretvalue and issecretvalue(unitClass)) then
             unitClass = UnitClassBase and UnitClassBase(unitID)
         end
         if not unitClass then return end
         unitClass = unitClass:upper()
+        local unitSpec = ResolveUnitSpecID(unitID)
+        local talents = (HexCD.TalentCache and HexCD.TalentCache.GetTalentsForUnit
+            and HexCD.TalentCache:GetTalentsForUnit(unitID)) or {}
         partyCD[name] = partyCD[name] or {}
-        local count = 0
-        for spellID, info in pairs(DB:GetAllSpells()) do
-            if info.class == unitClass then
-                if not partyCD[name][spellID] then
-                    partyCD[name][spellID] = {
+        -- Stash the class token (e.g. "MONK") so display code can wrap
+        -- the name in class color without needing to re-resolve UnitClass
+        -- at render time.
+        partyCD[name]._class = unitClass
+        -- Stash the specID so the display layer can resolve per-spec
+        -- categoryOverride (hybrid spells like Avenging Wrath route to
+        -- the OFFENSIVE bar for Ret/Prot but the HEALING bar for Holy).
+        partyCD[name]._specID = unitSpec
+        local count, skippedUtility = 0, 0
+
+        -- Primary source: AuraRules (BySpec + ByClass). Talent-gated rules
+        -- are included only when the unit's talent set permits — e.g. Ice
+        -- Cold (414659) skipped for Mages without the talent. Deduped by
+        -- SpellId so multiple variants of the same spell collapse.
+        local AD = HexCD.AuraDetector
+        if AD and AD.GetRulesForClassSpec then
+            local rules = AD:GetRulesForClassSpec(unitClass, unitSpec, talents)
+            for _, rule in ipairs(rules) do
+                if not partyCD[name][rule.SpellId] then
+                    partyCD[name][rule.SpellId] = {
                         readyTime = 0,
-                        effectiveCD = info.cd,
+                        effectiveCD = rule.Cooldown,
                         castTime = 0,
                     }
                     count = count + 1
                 end
             end
         end
+
+        -- Secondary source: SpellDB UTILITY/HEALING spells that aren't in
+        -- AuraRules (BoF, Stampeding Roar, etc.). Spec-gated entries are
+        -- only added when we actually know the unit's spec — previously
+        -- we fell back to "lenient" pre-pop when spec was unknown, which
+        -- populated off-spec spells (e.g. Incarnation: Guardian on a
+        -- Resto Druid). PLAYER_SPECIALIZATION_CHANGED /
+        -- PLAYER_ENTERING_WORLD / INSPECT_READY re-runs this function
+        -- once the spec resolves, so strict gating is safe.
+        local DB = HexCD.SpellDB
+        if DB and DB.GetAllSpells then
+            for spellID, info in pairs(DB:GetAllSpells()) do
+                if info.class == unitClass and not partyCD[name][spellID] then
+                    local allow = true
+                    if info.pvpTalent then
+                        -- PvP talents never pre-pop in PvE context.
+                        allow = false
+                    elseif info.talentOnly then
+                        -- Talent-gated: pre-pop only if the unit actually
+                        -- has the spell. Layered check:
+                        --   (a) local player: Util.PlayerHasSpell — tries
+                        --       IsPlayerSpell + IsSpellKnown +
+                        --       FindSpellBookSlotBySpellID (catches legacy
+                        --       cast IDs that talent-tree traversal misses).
+                        --   (b) TalentCache lookup (works for player too,
+                        --       needed in tests that set talents directly).
+                        allow = false
+                        if unitID == "player"
+                           and HexCD.Util and HexCD.Util.PlayerHasSpell
+                           and HexCD.Util.PlayerHasSpell(spellID) then
+                            allow = true
+                        elseif talents and talents[spellID] then
+                            allow = true
+                        end
+                        -- Log diagnostic for talentOnly class-tree CCs so a
+                        -- user can see why a talent they have isn't showing.
+                        if Log and unitID == "player"
+                           and info.class == unitClass and not info.specs
+                           and info.category == "CC" then
+                            Log:Log("DEBUG", string.format(
+                                "CommSync: talent check %s (%d, %s) → %s",
+                                tostring(info.name), spellID,
+                                tostring(info.category),
+                                allow and "PASS" or "skip"))
+                        end
+                    end
+                    if allow and info.specs then
+                        -- Require known spec to match the list. If spec
+                        -- is still nil at this moment, re-pop later will
+                        -- pick it up — don't leak off-spec entries now.
+                        local specMatch = false
+                        if unitSpec then
+                            for _, s in ipairs(info.specs) do
+                                if s == unitSpec then specMatch = true; break end
+                            end
+                        end
+                        allow = specMatch
+                    end
+                    if allow and info.cd then
+                        partyCD[name][spellID] = {
+                            readyTime = 0,
+                            effectiveCD = info.cd,
+                            castTime = 0,
+                        }
+                        count = count + 1
+                    elseif not allow then
+                        skippedUtility = skippedUtility + 1
+                    end
+                end
+            end
+        end
+
         if count > 0 then
-            Log:Log("DEBUG", string.format("CommSync: pre-populated %d spells for %s (%s)", count, name, unitClass))
+            Log:Log("DEBUG", string.format(
+                "CommSync: pre-populated %d spells for %s (%s, spec=%s, skipped %d utility-gated)",
+                count, name, unitClass, tostring(unitSpec), skippedUtility))
         end
     end)
 end
 
---- Scan all party members and pre-populate their personal CDs.
---- Called on init, GROUP_ROSTER_UPDATE, and PLAYER_ENTERING_WORLD.
+--- Scan all group members (party or raid) and pre-populate their
+--- personal CDs. Called on init, GROUP_ROSTER_UPDATE, and
+--- PLAYER_ENTERING_WORLD.
 ScanAndPopulateParty = function()
     if not HexCD.Util.IsInAnyGroup() then return end
-    for i = 1, 4 do
-        local uid = "party" .. i
+
+    -- In raids, party1..4 is either empty or partially mirrors raid
+    -- members — iterate raid1..40 instead. In a 5-man party, use
+    -- party1..4.
+    local inRaid = IsInRaid and IsInRaid()
+    local prefix = inRaid and "raid" or "party"
+    local maxN = inRaid and 40 or 4
+
+    for i = 1, maxN do
+        local uid = prefix .. i
         pcall(function()
             if not UnitExists(uid) then return end
+            -- Skip ourselves when iterating raid tokens (UnitIsUnit picks
+            -- up that raidN == player for whichever slot is us).
+            if inRaid and UnitIsUnit and UnitIsUnit(uid, "player") then return end
             local name = UnitName(uid)
             if not name or (issecretvalue and issecretvalue(name)) then return end
             name = StripRealm(name)
             PrePopulatePersonalCDs(uid, name)
+            -- Request talent / spec data so INSPECT_READY can prune later.
+            if CanInspect and NotifyInspect and CanInspect(uid) then
+                pcall(NotifyInspect, uid)
+            end
         end)
+    end
+end
+
+--- Prune entries that were pre-populated without spec knowledge and no
+--- longer match the player's now-known spec. Only prunes entries that
+--- were never observed live (readyTime == 0 AND castTime == 0).
+function CS:PruneWrongSpec(unitID, name)
+    local DB = HexCD.SpellDB
+    if not DB or not partyCD[name] then return end
+    local specID = ResolveUnitSpecID(unitID)
+    if not specID then return end
+
+    local pruned = 0
+    for spellID, state in pairs(partyCD[name]) do
+        if type(spellID) == "number" and type(state) == "table" then
+            local info = DB:GetSpell(spellID)
+            if info and info.specs then
+                local ok = false
+                for _, s in ipairs(info.specs) do
+                    if s == specID then ok = true; break end
+                end
+                -- Prune only untouched (pre-pop ghost) entries
+                if not ok and (state.readyTime or 0) == 0 and (state.castTime or 0) == 0 then
+                    partyCD[name][spellID] = nil
+                    pruned = pruned + 1
+                end
+            elseif info and info.pvpTalent then
+                -- Remove leaked pvpTalent entries from legacy pre-pops.
+                if (state.readyTime or 0) == 0 and (state.castTime or 0) == 0 then
+                    partyCD[name][spellID] = nil
+                    pruned = pruned + 1
+                end
+            elseif info and info.talentOnly then
+                -- Prune talentOnly pre-pop entries the unit doesn't actually
+                -- have. Same check PrePopulatePersonalCDs uses: local player
+                -- via Util.PlayerHasSpell (IsPlayerSpell + fallbacks), party
+                -- via TalentCache. Only prune untouched pre-pop ghosts.
+                if (state.readyTime or 0) == 0 and (state.castTime or 0) == 0 then
+                    local talents = (HexCD.TalentCache and HexCD.TalentCache.GetTalentsForUnit
+                        and HexCD.TalentCache:GetTalentsForUnit(unitID)) or {}
+                    local has = false
+                    if unitID == "player"
+                       and HexCD.Util and HexCD.Util.PlayerHasSpell
+                       and HexCD.Util.PlayerHasSpell(spellID) then
+                        has = true
+                    elseif talents[spellID] then
+                        has = true
+                    end
+                    if not has then
+                        partyCD[name][spellID] = nil
+                        pruned = pruned + 1
+                    end
+                end
+            end
+        end
+    end
+    if pruned > 0 and Log then
+        Log:Log("DEBUG", string.format(
+            "CommSync: pruned %d off-spec pre-pop entries for %s (spec=%s)",
+            pruned, name, tostring(specID)))
     end
 end
 
@@ -627,32 +630,26 @@ function CS:Init()
     eventFrame:SetScript("OnEvent", OnEvent)
 
     eventFrame:RegisterEvent("UNIT_SPELLCAST_SUCCEEDED")
-    eventFrame:RegisterEvent("CHAT_MSG_ADDON")
     eventFrame:RegisterEvent("GROUP_ROSTER_UPDATE")
     eventFrame:RegisterEvent("PLAYER_ENTERING_WORLD")
-    eventFrame:RegisterEvent("PLAYER_SPECIALIZATION_CHANGED")
     eventFrame:RegisterEvent("ENCOUNTER_START")
     eventFrame:RegisterEvent("ENCOUNTER_END")
     eventFrame:RegisterEvent("PLAYER_REGEN_DISABLED")
     eventFrame:RegisterEvent("PLAYER_REGEN_ENABLED")
     eventFrame:RegisterEvent("CHALLENGE_MODE_START")
     eventFrame:RegisterEvent("CHALLENGE_MODE_COMPLETED")
-
-    -- Register prefix (idempotent — DispelTracker/KickTracker may have already done this)
-    if C_ChatInfo and C_ChatInfo.RegisterAddonMessagePrefix then
-        pcall(C_ChatInfo.RegisterAddonMessagePrefix, ADDON_MSG_PREFIX)
-        commsRegistered = true
-    end
+    eventFrame:RegisterEvent("PLAYER_SPECIALIZATION_CHANGED")
+    eventFrame:RegisterEvent("INSPECT_READY")
 
     -- Hook into CooldownTracker for spec-specific CDs (Convoke, Tranq, etc.)
     -- CT already validates the spell is tracked for this spec — no need to
     -- re-check against SpellDB (which may not have spec-specific IDs
-    -- like Convoke 391528, Flourish 197721, etc.)
+    -- like Convoke 391528, etc.)
     local CT = HexCD.CooldownTracker
     if CT then
         CT._onCastCallback = function(spellID, state)
             if state then
-                RecordAndBroadcast(spellID, state.effectiveCD)
+                RecordLocalCast(spellID, state.effectiveCD)
             end
         end
     end
@@ -664,10 +661,7 @@ function CS:Init()
     -- (works even without CDHELLO — discovers class from UnitClass)
     ScanAndPopulateParty()
 
-    -- Send initial hello if already in a group
-    SendCDHello()
-
-    Log:Log("INFO", "CommSync: initialized (party CD sync)")
+    Log:Log("INFO", "CommSync: initialized (local detection, no addon comms)")
 end
 
 ------------------------------------------------------------------------
@@ -780,6 +774,7 @@ function CS:SimulateParty()
     -- Local player: use Druid data
     InjectSpells(localPlayerName, CLASS_TEST.DRUID)
     partyCD[localPlayerName]._spec = "Restoration"
+    partyCD[localPlayerName]._class = "DRUID"
 
     -- Other party members: get class from UnitClass, use matching test data
     local classPool = { "WARRIOR", "DEATHKNIGHT", "PRIEST", "SHAMAN", "EVOKER", "PALADIN", "DEMONHUNTER" }
@@ -800,6 +795,7 @@ function CS:SimulateParty()
                 local data = CLASS_TEST[className] or FALLBACK
                 InjectSpells(short, data)
                 partyCD[short]._spec = className
+                partyCD[short]._class = className
             end
         end
     end
@@ -866,21 +862,21 @@ function CS:_testGetState()
     return {
         partyCD = partyCD,
         localPlayerName = localPlayerName,
-        localSpec = localSpec,
-        commsRegistered = commsRegistered,
         inEncounter = inEncounter,
         inCombat = inCombat,
         inMythicPlus = inMythicPlus,
     }
 end
 
-function CS:_testInjectMessage(msg, sender)
-    OnAddonMessage(ADDON_MSG_PREFIX, msg, "PARTY", sender or "Test-Realm")
-end
-
 function CS:_testReset()
     partyCD = {}
     lastDirectCast = {}
     localPlayerName = StripRealm(UnitName("player") or "Unknown")
-    localSpec = nil
+end
+
+-- Expose PrePopulatePersonalCDs so tests can verify the pre-pop/prune
+-- cycle converges (regression for the WW Monk pre-pop/prune ping-pong
+-- where AuraRules.ByClass[MONK] re-added 115203 every cycle).
+function CS:_testPrePopulate(unitID, name)
+    return PrePopulatePersonalCDs(unitID, name)
 end

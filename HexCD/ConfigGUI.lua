@@ -639,6 +639,7 @@ local function CreateMainFrame()
         { key = "external",  label = "External Def", color = {0.25, 0.8, 0.25} },
         { key = "utility",   label = "Utility",     color = {0.53, 0.67, 0.8} },
         { key = "healing",   label = "Healing",     color = {0.25, 0.53, 0.8} },
+        { key = "offensive", label = "Offensive",   color = {1.0, 0.53, 0.25} },
         { key = "kicks",     label = "Kicks",       color = {0.8, 0.25, 0.25} },
         { key = "cc",        label = "CC",           color = {0.8, 0.25, 0.8} },
         { key = "dispels",   label = "Dispels",     color = {0.25, 0.8, 0.8} },
@@ -647,8 +648,8 @@ local function CreateMainFrame()
     -- Map sidebar key → SpellDB category
     local SIDEBAR_TO_CATEGORY = {
         personal = "PERSONAL", external = "EXTERNAL_DEFENSIVE",
-        utility = "UTILITY", healing = "HEALING", kicks = "KICK",
-        cc = "CC", dispels = "DISPEL",
+        utility = "UTILITY", healing = "HEALING", offensive = "OFFENSIVE",
+        kicks = "KICK", cc = "CC", dispels = "DISPEL",
     }
 
     local sidebarFrame = CreateFrame("Frame", nil, f)

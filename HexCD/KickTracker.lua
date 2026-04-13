@@ -58,21 +58,80 @@ local HandleKickByName
 -- Constants
 ------------------------------------------------------------------------
 
+-- KICK_SPELLS: class → { default={}, specs={[specID]={}} }
+--   default : used when spec is unknown or not listed in specs
+--   specs   : spec-specific override. Map to `false` for specs that have
+--             NO baseline interrupt (e.g. Resto Druid, Disc/Holy Priest).
+-- The structure is needed because some classes have spec-differentiated
+-- interrupts (Balance Druid's Solar Beam vs Feral's Skull Bash, Survival
+-- Hunter's Muzzle vs the rest's Counter Shot).
 local KICK_SPELLS = {
-    ["Death Knight"] = { spellID = 47528,  name = "Mind Freeze",       cd = 15 },
-    ["Demon Hunter"] = { spellID = 183752, name = "Disrupt",           cd = 15 },
-    ["Druid"]        = { spellID = 106839, name = "Skull Bash",        cd = 15 },
-    ["Evoker"]       = { spellID = 351338, name = "Quell",             cd = 40 },
-    ["Hunter"]       = { spellID = 147362, name = "Counter Shot",      cd = 24 },
-    ["Mage"]         = { spellID = 2139,   name = "Counterspell",      cd = 24 },
-    ["Monk"]         = { spellID = 116705, name = "Spear Hand Strike", cd = 15 },
-    ["Paladin"]      = { spellID = 96231,  name = "Rebuke",            cd = 15 },
-    ["Priest"]       = { spellID = 15487,  name = "Silence",           cd = 45 },
-    ["Rogue"]        = { spellID = 1766,   name = "Kick",              cd = 15 },
-    ["Shaman"]       = { spellID = 57994,  name = "Wind Shear",        cd = 12 },
-    ["Warlock"]      = { spellID = 119910, name = "Spell Lock",        cd = 24 },
-    ["Warrior"]      = { spellID = 6552,   name = "Pummel",            cd = 15 },
+    ["Death Knight"] = { default = { spellID = 47528,  name = "Mind Freeze",       cd = 15 } },
+    ["Demon Hunter"] = { default = { spellID = 183752, name = "Disrupt",           cd = 15 } },
+    ["Druid"] = {
+        default = { spellID = 106839, name = "Skull Bash", cd = 15 }, -- fallback
+        specs = {
+            [102] = { spellID = 78675,  name = "Solar Beam", cd = 60 }, -- Balance
+            [103] = { spellID = 106839, name = "Skull Bash", cd = 15 }, -- Feral
+            [104] = { spellID = 106839, name = "Skull Bash", cd = 15 }, -- Guardian
+            [105] = false,                                              -- Resto: no baseline kick
+        },
+    },
+    ["Evoker"]  = { default = { spellID = 351338, name = "Quell",             cd = 40 } },
+    ["Hunter"]  = {
+        default = { spellID = 147362, name = "Counter Shot", cd = 24 },
+        specs = {
+            [253] = { spellID = 147362, name = "Counter Shot", cd = 24 }, -- BM
+            [254] = { spellID = 147362, name = "Counter Shot", cd = 24 }, -- MM
+            [255] = { spellID = 187707, name = "Muzzle",       cd = 15 }, -- Survival (melee)
+        },
+    },
+    ["Mage"]    = { default = { spellID = 2139,   name = "Counterspell",      cd = 24 } },
+    ["Monk"]    = { default = { spellID = 116705, name = "Spear Hand Strike", cd = 15 } },
+    ["Paladin"] = {
+        default = { spellID = 96231, name = "Rebuke", cd = 15 },
+        specs = {
+            [65] = false,                                          -- Holy: no baseline kick
+            [66] = { spellID = 96231, name = "Rebuke", cd = 15 },  -- Prot
+            [70] = { spellID = 96231, name = "Rebuke", cd = 15 },  -- Ret
+        },
+    },
+    ["Priest"] = {
+        default = { spellID = 15487, name = "Silence", cd = 45 },
+        specs = {
+            [256] = false,                                         -- Disc: no baseline kick
+            [257] = false,                                         -- Holy: no baseline kick
+            [258] = { spellID = 15487, name = "Silence", cd = 45 },-- Shadow
+        },
+    },
+    ["Rogue"]   = { default = { spellID = 1766,   name = "Kick",              cd = 15 } },
+    ["Shaman"]  = { default = { spellID = 57994,  name = "Wind Shear",        cd = 12 } },
+    ["Warlock"] = {
+        -- Affliction/Destruction run Felhunter → Spell Lock 24s.
+        -- Demonology runs Felguard → Axe Toss 30s.
+        default = { spellID = 119910, name = "Spell Lock", cd = 24 },
+        specs = {
+            [265] = { spellID = 119910, name = "Spell Lock", cd = 24 }, -- Affliction
+            [266] = { spellID = 89766,  name = "Axe Toss",   cd = 30 }, -- Demonology
+            [267] = { spellID = 119910, name = "Spell Lock", cd = 24 }, -- Destruction
+        },
+    },
+    ["Warrior"] = { default = { spellID = 6552,   name = "Pummel",            cd = 15 } },
 }
+
+-- Resolve a class/spec pair to its primary kick entry (or nil if the spec
+-- has no baseline interrupt). Falls back to `default` when specID is
+-- unknown or not listed in the class's specs table.
+local function ResolveKickSpell(classKey, specID)
+    local entry = KICK_SPELLS[classKey]
+    if not entry then return nil end
+    if specID and entry.specs ~= nil then
+        local override = entry.specs[specID]
+        if override == false then return nil end  -- explicit "no kick"
+        if override ~= nil then return override end
+    end
+    return entry.default
+end
 
 -- Secondary interrupts (long CD) — tracked if used but not the primary rotation spell
 local KICK_SPELLS_SECONDARY = {
@@ -81,10 +140,20 @@ local KICK_SPELLS_SECONDARY = {
     [386071] = { class = "Warrior", name = "Disrupting Shout",  cd = 90 },
 }
 
--- Reverse lookup: spellID → { class, name, cd }
+-- Reverse lookup: spellID → { class, name, cd }. Indexes the default
+-- + every spec variant + secondaries so a cast on any of them resolves.
 local KICK_SPELL_IDS = {}
-for class, info in pairs(KICK_SPELLS) do
-    KICK_SPELL_IDS[info.spellID] = { class = class, name = info.name, cd = info.cd }
+for class, entry in pairs(KICK_SPELLS) do
+    if entry.default then
+        KICK_SPELL_IDS[entry.default.spellID] = { class = class, name = entry.default.name, cd = entry.default.cd }
+    end
+    if entry.specs then
+        for _, v in pairs(entry.specs) do
+            if v and v.spellID and not KICK_SPELL_IDS[v.spellID] then
+                KICK_SPELL_IDS[v.spellID] = { class = class, name = v.name, cd = v.cd }
+            end
+        end
+    end
 end
 for spellID, info in pairs(KICK_SPELLS_SECONDARY) do
     KICK_SPELL_IDS[spellID] = info
@@ -319,7 +388,9 @@ function KT:_correlRoute(shortName, bestUnit)
             if entry.name == shortName then
                 local spellID = entry.spellID
                 if not spellID or spellID == 0 then
-                    local classInfo = entry.class and KICK_SPELLS[entry.class]
+                    local specID = HexCD.SpecCache and HexCD.SpecCache.Get
+                        and HexCD.SpecCache:Get(entry.name) or nil
+                    local classInfo = entry.class and ResolveKickSpell(entry.class, specID)
                     spellID = classInfo and classInfo.spellID or 0
                 end
                 HandleKickByName(shortName, spellID, gi, "correlated")
@@ -351,17 +422,36 @@ function KT:_correlRoute(shortName, bestUnit)
                 Log:Log("DEBUG", string.format("KickCorrel: %s kicked but rotation full (%d) — skipping", shortName, #groups[1].rotation))
             else
                 Log:Log("INFO", string.format("KickCorrel: %s kicked (not in rotation) — auto-adding to group 1", shortName))
-                local classInfo = nil
+                local kickInfo, classKey = nil, nil
                 pcall(function()
                     local _, c = UnitClass(bestUnit)
                     if c and not (issecretvalue and issecretvalue(c)) then
-                        classInfo = KICK_SPELLS[CLASSTOKEN_TO_NAME[c:upper()] or ""]
+                        classKey = CLASSTOKEN_TO_NAME[c:upper()]
+                        local specID = HexCD.SpecCache and HexCD.SpecCache.Get
+                            and HexCD.SpecCache:Get(shortName) or nil
+                        kickInfo = classKey and ResolveKickSpell(classKey, specID) or nil
                     end
                 end)
-                local spellID = classInfo and classInfo.spellID or 0
-                local cd = classInfo and classInfo.cd or 15
-                table.insert(groups[1].rotation, { name = shortName, class = nil, spellID = spellID, cd = cd })
+                local spellID = kickInfo and kickInfo.spellID or 0
+                local cd = kickInfo and kickInfo.cd or 15
+                table.insert(groups[1].rotation, { name = shortName, class = classKey, spellID = spellID, cd = cd })
                 if #groups[1].rotation == 1 then groups[1].currentIdx = 1 end
+                kickRotation = groups[1].rotation
+                -- Map the new entry to its unit token + persist the roster
+                -- so RebuildGroupMapping fills unitMap[i] and liveness checks
+                -- work for the auto-added kicker.
+                KT:RebuildGroupMapping()
+                local saveData = {}
+                for _, r in ipairs(groups[1].rotation) do
+                    table.insert(saveData, { name = r.name, class = r.class })
+                end
+                Config:Set(CfgKey("kickRotation", 1), saveData)
+                -- Transition to ACTIVE if we're in combat. PLAYER_REGEN_DISABLED
+                -- earlier may have kept us HIDDEN (empty rotation at combat
+                -- start); now that we have a kicker, show the bar.
+                if inCombat and Config:Get("kickEnabled") and visibilityState == "HIDDEN" then
+                    TransitionTo("ACTIVE")
+                end
             end
         end
         kickRotation = groups[1].rotation
@@ -535,11 +625,15 @@ function KT:RebuildGroupMapping()
                             entry.class = className:sub(1,1):upper() .. className:sub(2):lower()
                         end
                     end
-                    if entry.class and KICK_SPELLS[entry.class] then
-                        local info = KICK_SPELLS[entry.class]
-                        entry.spellID = info.spellID
-                        entry.cd = info.cd
-                        entry.kickName = info.name
+                    if entry.class then
+                        local specID = HexCD.SpecCache and HexCD.SpecCache.Get
+                            and HexCD.SpecCache:Get(entry.name) or nil
+                        local info = ResolveKickSpell(entry.class, specID)
+                        if info then
+                            entry.spellID = info.spellID
+                            entry.cd = info.cd
+                            entry.kickName = info.name
+                        end
                     end
                     break
                 end
@@ -620,10 +714,29 @@ function KT:UpdateDisplay()
         else
             gs.anchorFrame:Show()
 
+            -- Lazy class resolve: entries added via correlation auto-add or
+            -- during secretvalue'd roster scans may still have class=nil.
+            -- Retry here so the header + bar colors self-heal each frame.
+            for i, entry in ipairs(gs.rotation) do
+                if not entry.class then
+                    local unit = gs.unitMap[i]
+                    if unit and UnitExists(unit) then
+                        pcall(function()
+                            local _, c = UnitClass(unit)
+                            if c and not (issecretvalue and issecretvalue(c)) then
+                                entry.class = c:sub(1,1):upper() .. c:sub(2):lower()
+                            end
+                        end)
+                    end
+                end
+            end
+
             local activeIdx = gs.currentIdx
-            local nextName = (activeIdx and gs.rotation[activeIdx]) and gs.rotation[activeIdx].name or "?"
+            local nextEntry = activeIdx and gs.rotation[activeIdx] or nil
+            local nextName = (nextEntry and nextEntry.name) or "?"
+            local coloredNext = HexCD.Util.ColorNameByClass(nextName, nextEntry and nextEntry.class)
             local groupTag = gi > 1 and (" G" .. gi) or ""
-            gs.headerText:SetText("|cFF88CCFFKICK" .. groupTag .. "|r  |cFFFFCC00" .. nextName .. "'s turn|r")
+            gs.headerText:SetText("|cFF88CCFFKICK" .. groupTag .. "|r  " .. coloredNext .. "|cFFFFCC00's turn|r")
 
             local HEADER_HEIGHT = 20
             local GAP = 4
@@ -656,8 +769,16 @@ function KT:UpdateDisplay()
                         bar:Show()
                         yPos = yPos - BAR_SPACING
 
-                        local kickSpellName = entry.kickName or (entry.class and KICK_SPELLS[entry.class] and KICK_SPELLS[entry.class].name) or "Interrupt"
-                        bar.nameText:SetText(string.format("|cFFFFFFFF%d|r  %s |cFF888888(%s)|r", i, entry.name or "?", kickSpellName))
+                        local kickSpellName = entry.kickName
+                        if not kickSpellName and entry.class then
+                            local specID = HexCD.SpecCache and HexCD.SpecCache.Get
+                                and HexCD.SpecCache:Get(entry.name) or nil
+                            local info = ResolveKickSpell(entry.class, specID)
+                            kickSpellName = info and info.name or "Interrupt"
+                        end
+                        kickSpellName = kickSpellName or "Interrupt"
+                        local coloredName = HexCD.Util.ColorNameByClass(entry.name or "?", entry.class)
+                        bar.nameText:SetText(string.format("|cFFFFFFFF%d|r  %s |cFF888888(%s)|r", i, coloredName, kickSpellName))
 
                         if ready then
                             bar.cdText:SetText("|cFF00FF00OK|r")
@@ -830,11 +951,25 @@ HandleKickByName = function(casterName, spellID, groupIdx, source)
     casterName = StripRealm(casterName)
     local now = GetTime()
 
-    local spellInfo = KICK_SPELL_IDS[spellID]
-    local spellCD = spellInfo and spellInfo.cd or 15
-
     for i, entry in ipairs(gs.rotation) do
         if entry.name == casterName then
+            -- Resolve the kick spell. Combat log in Midnight sometimes hands
+            -- us a redacted spellID (0 or nil — see MIDNIGHT-API-RESTRICTIONS).
+            -- When that happens, fall back to the class/spec-resolved kick.
+            local spellInfo = spellID and spellID ~= 0 and KICK_SPELL_IDS[spellID] or nil
+            local effectiveSpellID = spellID
+            local resolvedVia = nil
+            if not spellInfo and entry.class then
+                local specID = HexCD.SpecCache and HexCD.SpecCache:Get(casterName)
+                local resolved = ResolveKickSpell(entry.class, specID)
+                if resolved then
+                    spellInfo = resolved
+                    effectiveSpellID = resolved.spellID
+                    resolvedVia = "class-fallback"
+                end
+            end
+            local spellCD = spellInfo and spellInfo.cd or 15
+
             -- Dedup: skip if already recorded within DEDUP_WINDOW
             local existing = gs.cdState[i]
             if existing and (now - existing.lastTime) < DEDUP_WINDOW then
@@ -847,8 +982,10 @@ HandleKickByName = function(casterName, spellID, groupIdx, source)
                 lastTime = now,
                 readyTime = now + spellCD,
             }
-            Log:Log("INFO", string.format("KickTracker: %s used kick (spell %s) group %d [%s]",
-                casterName, tostring(spellID), groupIdx, source))
+            Log:Log("INFO", string.format("KickTracker: %s used kick (spell %s%s) group %d [%s]",
+                casterName, tostring(effectiveSpellID or "?"),
+                resolvedVia and (", via " .. resolvedVia) or "",
+                groupIdx, source))
             break
         end
     end
@@ -920,6 +1057,12 @@ eventFrame:RegisterEvent("GROUP_ROSTER_UPDATE")
 eventFrame:RegisterEvent("CHAT_MSG_ADDON")
 eventFrame:RegisterEvent("PLAYER_REGEN_DISABLED")
 eventFrame:RegisterEvent("PLAYER_REGEN_ENABLED")
+-- INSPECT_READY arrives after GROUP_ROSTER_UPDATE once spec resolves;
+-- rebuild so e.g. a Balance Druid's Solar Beam replaces the default
+-- Skull Bash in the rotation.
+eventFrame:RegisterEvent("INSPECT_READY")
+-- Local-player re-resolve fires PLAYER_SPECIALIZATION_CHANGED.
+eventFrame:RegisterEvent("PLAYER_SPECIALIZATION_CHANGED")
 
 eventFrame:SetScript("OnEvent", function(self, event, ...)
     if event == "CHAT_MSG_ADDON" then
@@ -962,6 +1105,12 @@ eventFrame:SetScript("OnEvent", function(self, event, ...)
     elseif event == "GROUP_ROSTER_UPDATE" then
         KT:RebuildGroupMapping()
         KT:AutoEnroll()
+
+    elseif event == "INSPECT_READY" or event == "PLAYER_SPECIALIZATION_CHANGED" then
+        -- Spec became known / changed — re-resolve kick variants so
+        -- spec-specific interrupts (Solar Beam vs Skull Bash, Muzzle vs
+        -- Counter Shot) get picked up in the rotation display.
+        KT:RebuildGroupMapping()
     end
 end)
 
@@ -972,18 +1121,41 @@ end)
 --- Auto-enroll kickers based on group composition.
 --- Party: all tanks + DPS with interrupts. Raid: no auto-enrollment.
 function KT:AutoEnroll()
-    if not HexCD.Util.IsInAnyGroup() then return end
+    if not HexCD.Util.IsInAnyGroup() then
+        Log:Log("DEBUG", "KickTracker.AutoEnroll: skipped — not in any group")
+        return
+    end
 
     local comp = Util.ScanGroupComposition()
-
-    -- No auto-enrollment in raid
-    if comp.isRaid then return end
-    if #comp.kickers == 0 then return end
 
     -- Check if group 1 rotation is stale
     local currentNames = self:GetRotationNames(1)
     local groupSet = {}
     for _, n in ipairs(comp.kickers) do groupSet[n] = true end
+
+    Log:Log("DEBUG", string.format(
+        "KickTracker.AutoEnroll: comp.kickers=%d, currentRotation=%d, isRaid=%s",
+        #comp.kickers, #currentNames, tostring(comp.isRaid)))
+
+    -- If the current group has NO valid kickers (follower dungeon /
+    -- Exile's Reach / solo world / raid-without-kickers), clear the
+    -- rotation entirely rather than leave ghosts from a previous key.
+    -- Otherwise "rotation full (4)" prevents real kickers from getting
+    -- auto-added when a real group forms.
+    if #comp.kickers == 0 then
+        if #currentNames > 0 then
+            groups[1].rotation = {}
+            groups[1].currentIdx = 1
+            wipe(groups[1].cdState)
+            kickRotation = groups[1].rotation
+            kickCDState = groups[1].cdState
+            currentIdx = 1
+            Config:Set("kickRotation", {})
+            Log:Log("INFO", "KickTracker: cleared stale rotation (no kickers in current group)")
+            KT:RebuildGroupMapping()
+        end
+        return
+    end
 
     -- Always clean up stale group 2 (old party/test data)
     local allMembers = {}
@@ -1001,17 +1173,107 @@ function KT:AutoEnroll()
         end
     end
 
-    -- Check if group 1 rotation is stale
+    -- Auto-enroll if any rotation name is no longer a valid kicker in
+    -- the current group — someone left, respecced to healer, etc. Any
+    -- single gone member triggers a full re-enroll with current kickers.
+    -- Stale in either direction:
+    --   (a) rotation has a name no longer a current kicker (left group,
+    --       respecced), OR
+    --   (b) current group has a kicker not in the rotation (new member
+    --       joined, or rotation was only partial).
     local stale = (#currentNames == 0)
+    local staleReason = stale and "empty" or nil
+    local rotationSet = {}
+    for _, n in ipairs(currentNames) do rotationSet[n] = true end
     if not stale then
         for _, n in ipairs(currentNames) do
-            if not groupSet[n] then stale = true; break end
+            if not groupSet[n] then
+                stale = true
+                staleReason = n .. " not in current kickers"
+                break
+            end
         end
     end
-    if not stale then return end
+    if not stale then
+        for _, n in ipairs(comp.kickers) do
+            if not rotationSet[n] then
+                stale = true
+                staleReason = n .. " not yet in rotation"
+                break
+            end
+        end
+    end
+    if not stale then
+        Log:Log("DEBUG", "KickTracker.AutoEnroll: rotation still valid, no-op")
+        return
+    end
+    Log:Log("DEBUG", "KickTracker.AutoEnroll: stale (" .. tostring(staleReason) .. "), re-enrolling")
 
-    KT:SetRotation(comp.kickers, 1)
-    Log:Log("INFO", "KickTracker: auto-enrolled " .. #comp.kickers .. " kickers")
+    -- Sort auto-enrolled kickers by CD ascending (lowest CD first). This
+    -- gives the party a fast-rotating baseline: the player with the cheapest
+    -- interrupt goes up, then the next, etc. Resolves each kicker's class +
+    -- spec to look up their kick CD via the KICK_SPELLS table.
+    local prefix, maxCount = Util.GetGroupUnitInfo()
+    local nameToCd = {}
+    local function recordCd(unit)
+        local ok, name = pcall(UnitName, unit)
+        if not ok or not name or name == "" then return end
+        if issecretvalue and issecretvalue(name) then return end
+        local shortName = name:match("^([^-]+)") or name
+        local classKey = nil
+        pcall(function()
+            local _, c = UnitClass(unit)
+            if c and not issecretvalue(c) then
+                -- KICK_SPELLS is keyed by friendly name ("Death Knight"), so
+                -- convert class token back via CLASS_SORT_ORDER mapping.
+                local map = { DEATHKNIGHT="Death Knight", DEMONHUNTER="Demon Hunter",
+                              DRUID="Druid", EVOKER="Evoker", HUNTER="Hunter",
+                              MAGE="Mage", MONK="Monk", PALADIN="Paladin",
+                              PRIEST="Priest", ROGUE="Rogue", SHAMAN="Shaman",
+                              WARLOCK="Warlock", WARRIOR="Warrior" }
+                classKey = map[c:upper()] or c
+            end
+        end)
+        local specID = nil
+        if unit == "player" then
+            pcall(function()
+                local idx = GetSpecialization and GetSpecialization()
+                if idx then specID = select(1, GetSpecializationInfo and GetSpecializationInfo(idx)) end
+            end)
+        else
+            -- party specID requires inspect; fall back to default kick CD
+            -- when unknown (ResolveKickSpell handles nil specID correctly).
+        end
+        local info = classKey and ResolveKickSpell(classKey, specID) or nil
+        if info then nameToCd[shortName] = info.cd end
+    end
+    recordCd("player")
+    if prefix and maxCount then
+        for i = 1, maxCount do
+            local unit = prefix .. i
+            if UnitExists(unit) then recordCd(unit) end
+        end
+    end
+    local sorted = {}
+    for _, n in ipairs(comp.kickers) do table.insert(sorted, n) end
+    table.sort(sorted, function(a, b)
+        local ca, cb = nameToCd[a] or 999, nameToCd[b] or 999
+        if ca ~= cb then return ca < cb end
+        return a < b  -- stable tiebreak by name
+    end)
+
+    -- Cap auto-enroll at 5 (same as DispelTracker). Keeps the bar compact
+    -- and picks the lowest-CD kickers first.
+    local MAX_AUTO_ENROLL = 5
+    if #sorted > MAX_AUTO_ENROLL then
+        local trimmed = {}
+        for i = 1, MAX_AUTO_ENROLL do trimmed[i] = sorted[i] end
+        sorted = trimmed
+    end
+
+    KT:SetRotation(sorted, 1)
+    Log:Log("INFO", string.format("KickTracker: auto-enrolled %d kickers%s, sorted by CD",
+        #sorted, comp.isRaid and " (raid)" or ""))
 end
 
 function KT:GetRotationNames(groupIdx)
@@ -1150,6 +1412,10 @@ end
 -- Test helpers
 ------------------------------------------------------------------------
 
+function KT:_testResolveKickSpell(classKey, specID)
+    return ResolveKickSpell(classKey, specID)
+end
+
 function KT:_testGetState(groupIdx)
     groupIdx = groupIdx or 1
     local gs = groups[groupIdx]
@@ -1177,4 +1443,11 @@ end
 
 function KT:_testInjectMessage(msg, sender)
     HandleAddonMessage(ADDON_MSG_PREFIX, msg, "PARTY", sender or "Test-Realm")
+end
+
+-- Expose _correlRoute so tests can verify the auto-add-from-correlation
+-- path populates the rotation entry's class (regression for uncolored kick
+-- bars when a new kicker was added via KickCorrel).
+function KT:_testCorrelRoute(shortName, bestUnit)
+    KT:_correlRoute(shortName, bestUnit)
 end

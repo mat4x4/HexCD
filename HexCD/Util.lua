@@ -15,6 +15,44 @@ local Util = HexCD.Util
 -- IsInGroup() without args only checks HOME. M+ uses INSTANCE.
 ------------------------------------------------------------------------
 
+--- Does the local player actually know / have access to this spell?
+--- Authoritative truth for "is this talent taken" on the local player,
+--- more reliable than walking the C_Traits tree (some talent nodes
+--- encode legacy cast IDs via different grant-spell IDs so TalentCache's
+--- defInfo.spellID lookup misses them).
+---
+--- Tries, in order:
+---   1. IsPlayerSpell  — canonical, works for most spells.
+---   2. IsSpellKnown   — second-chance for legacy-ID cases.
+---   3. FindSpellBookSlotBySpellID — slot-based lookup, catches spells
+---      IsPlayerSpell misses when the talent tree wrapped the cast ID.
+--- All wrapped in pcall for secret-value guards.
+---
+--- @param spellID number
+--- @return boolean
+function Util.PlayerHasSpell(spellID)
+    if type(spellID) ~= "number" or spellID <= 0 then return false end
+
+    if IsPlayerSpell then
+        local ok, res = pcall(IsPlayerSpell, spellID)
+        if ok and res == true then return true end
+    end
+    if IsSpellKnown then
+        local ok, res = pcall(IsSpellKnown, spellID)
+        if ok and res == true then return true end
+    end
+    if FindSpellBookSlotBySpellID then
+        local ok, res = pcall(FindSpellBookSlotBySpellID, spellID)
+        if ok and type(res) == "number" and res > 0 then return true end
+    end
+    -- C_SpellBook newer API (Midnight)
+    if C_SpellBook and C_SpellBook.IsSpellBookEntry then
+        local ok, res = pcall(C_SpellBook.IsSpellBookEntry, spellID)
+        if ok and res == true then return true end
+    end
+    return false
+end
+
 --- True if the player is in any group (party, instance, or raid).
 function Util.IsInAnyGroup()
     return (IsInGroup and (IsInGroup() or IsInGroup(2))) and true or false
@@ -57,6 +95,68 @@ function Util.FormatTime(sec)
     local m = math.floor(sec / 60)
     local s = math.floor(sec % 60)
     return string.format("%d:%02d", m, s)
+end
+
+--- Map our title-case class names ("Death Knight", "Priest") to the
+--- upper class token that RAID_CLASS_COLORS is keyed by.
+local CLASS_TOKEN = {
+    ["Death Knight"] = "DEATHKNIGHT",
+    ["Demon Hunter"] = "DEMONHUNTER",
+    ["Druid"]        = "DRUID",
+    ["Evoker"]       = "EVOKER",
+    ["Hunter"]       = "HUNTER",
+    ["Mage"]         = "MAGE",
+    ["Monk"]         = "MONK",
+    ["Paladin"]      = "PALADIN",
+    ["Priest"]       = "PRIEST",
+    ["Rogue"]        = "ROGUE",
+    ["Shaman"]       = "SHAMAN",
+    ["Warlock"]      = "WARLOCK",
+    ["Warrior"]      = "WARRIOR",
+}
+
+--- Is this unit token one of our tracked group members? Matches
+--- `player`, `party1..4`, and `raid1..40`. Use in aura/cast handlers
+--- so a single filter covers 5-man keys and 10/20/40-man raids.
+--- @param unit string?
+--- @return boolean
+function Util.IsGroupMemberUnit(unit)
+    if not unit then return false end
+    if unit == "player" then return true end
+    if unit:match("^party[1-4]$") then return true end
+    local n = unit:match("^raid(%d+)$")
+    if n then
+        n = tonumber(n)
+        return n and n >= 1 and n <= 40
+    end
+    return false
+end
+
+--- Same as above but excludes "player" — useful when we only want
+--- *other* group members (e.g. casting-source filters).
+--- @param unit string?
+--- @return boolean
+function Util.IsOtherGroupMemberUnit(unit)
+    if unit == "player" then return false end
+    return Util.IsGroupMemberUnit(unit)
+end
+
+--- Wrap a player name in their class color for SetText. Accepts either
+--- a localized/title-case class name ("Priest") or the class token
+--- ("PRIEST") — returns the name unchanged if the class can't be
+--- resolved or RAID_CLASS_COLORS isn't available (test harness).
+--- @param name string
+--- @param classish string?  title-case class name OR uppercase token
+--- @return string coloredName  with |cAARRGGBB...|r wrap if possible
+function Util.ColorNameByClass(name, classish)
+    if not name then return "?" end
+    if not classish then return name end
+    local token = CLASS_TOKEN[classish] or classish:upper()
+    local colors = _G.RAID_CLASS_COLORS
+    if not colors then return name end
+    local c = colors[token]
+    if not c or not c.colorStr then return name end
+    return "|c" .. c.colorStr .. name .. "|r"
 end
 
 --- Format seconds into "Xs" or "M:SS" depending on magnitude
@@ -348,10 +448,12 @@ function Util.ScanGroupComposition()
     end
 
     for _, unit in ipairs(units) do
-        -- Skip NPC followers/companions (follower dungeons)
-        local isPlayer = (unit == "player")
-        if not isPlayer then pcall(function() isPlayer = UnitIsPlayer(unit) end) end
-        if isPlayer then
+        -- Include players AND NPC followers (Exile's Reach / follower
+        -- dungeons use follower NPCs that cast kicks/dispels/CDs just
+        -- like real players from the addon's perspective — Meredy
+        -- Huntswell does cast Counterspell, etc.). Stale detection
+        -- handles cleanup when user joins a real party later.
+        if true then
         local ok, name = pcall(UnitName, unit)
         if ok and name and name ~= "" and not (issecretvalue and issecretvalue(name)) then
             local shortName = name:match("^([^-]+)") or name
