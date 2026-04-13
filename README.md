@@ -12,7 +12,7 @@ A cooldown tracker for WoW Midnight that works with the new addon restrictions.
 
 ## Screenshots
 
-![Floating CD bars grouped by category](docs/screenshot-bars.png)
+![Personal defensives anchored to party unit frames](docs/screenshot-defensives.png)
 
 ![Config GUI — Spell Filters tab](docs/screenshot-config.png)
 
