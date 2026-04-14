@@ -168,15 +168,13 @@ local function OnCastEvent(event, unit, _, spellIDFromEvent)
     local ev = handlers[event]
     if not ev then return end
 
-    -- For START/CHANNEL_START, pull rich info from the casting/channel API.
-    -- For other events the unit may already have stopped casting, so the
-    -- event payload's spellID is what we have.
-    local info = nil
-    if ev == "START" then
-        info = ReadCastInfo(unit)
-    elseif ev == "CHANNEL_START" then
-        info = ReadChannelInfo(unit)
-    end
+    -- For START/CHANNEL_START we always try the rich casting API. For other
+    -- events we try it too — UNIT_SPELLCAST_INTERRUPTIBLE/NOT_INTERRUPTIBLE
+    -- have no spellID in the payload, and DELAYED/INTERRUPTED happen while
+    -- the cast row is still queryable. SUCCEEDED/STOP/FAILED typically fire
+    -- after the cast cleared; UnitCastingInfo returns nil and we fall back
+    -- to the event's spellID arg.
+    local info = ReadCastInfo(unit) or ReadChannelInfo(unit)
 
     Log:Log("DEBUG", FormatLine(ev, unit, info, spellIDFromEvent))
 end
