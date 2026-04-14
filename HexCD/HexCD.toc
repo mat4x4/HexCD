@@ -14,6 +14,7 @@ SpecCache.lua
 CooldownTracker.lua
 DispelTracker.lua
 KickTracker.lua
+CastDetector.lua
 CommSync.lua
 AuraRules.lua
 TalentDefaults.lua

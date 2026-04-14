@@ -24,6 +24,7 @@ local function OnEvent(self, event, ...)
             if GUI then GUI:Init() end
             if HexCD.DispelTracker then HexCD.DispelTracker:Init() end
             if HexCD.KickTracker then HexCD.KickTracker:Init() end
+            if HexCD.CastDetector then HexCD.CastDetector:Init() end
             if HexCD.CommSync then HexCD.CommSync:Init() end
             if HexCD.AuraDetector then HexCD.AuraDetector:Init() end
             if HexCD.PartyCDDisplay then HexCD.PartyCDDisplay:Init() end
