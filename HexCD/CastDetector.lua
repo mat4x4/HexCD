@@ -120,28 +120,75 @@ end
 
 ------------------------------------------------------------------------
 -- Core formatter — single point for the structured log line.
+--
+-- Guards: nameplate spellIDs in Midnight 12.0 can arrive as "secret values"
+-- which break string.format/%s/tostring with silent throws at the frame
+-- script boundary. Every untrusted field goes through a laundering pass
+-- or the issecretvalue gate before hitting string.format.
 ------------------------------------------------------------------------
-local function FormatLine(ev, unit, info, spellIDFromEvent)
-    local spellID = (info and info.spellID) or spellIDFromEvent
-    spellID = CleanSpellID(spellID)
-    local name = (info and info.name) or SpellName(spellID)
-    if name and issecretvalue and issecretvalue(name) then name = "?" end
+-- Every field from UnitCastingInfo / UnitChannelInfo on nameplates may be a
+-- "secret value" in Midnight 12.0 — including startMS/endMS/spellID/name.
+-- Any arithmetic, tostring, or %s format on a secret value throws AND taints
+-- the caller. Filter through IsSecret BEFORE touching the value.
+local function IsSecret(v)
+    if v == nil then return false end
+    if not issecretvalue then return false end
+    local ok, res = pcall(issecretvalue, v)
+    return ok and res == true
+end
 
+local function SafeStr(v)
+    if v == nil then return "?" end
+    if IsSecret(v) then return "secret" end
+    local ok, s = pcall(tostring, v)
+    if ok and type(s) == "string" then return s end
+    return "?"
+end
+
+local function FormatLine(ev, unit, info, spellIDFromEvent)
+    local rawID = (info and info.spellID) or spellIDFromEvent
+    local spellID = nil
+    if rawID ~= nil and not IsSecret(rawID) then
+        spellID = CleanSpellID(rawID)
+    elseif rawID ~= nil then
+        -- rawID was secret. Launder it through the StatusBar trick without
+        -- direct arithmetic — CleanSpellID pcalls internally.
+        spellID = CleanSpellID(rawID)
+    end
+
+    local name = info and info.name
+    if name == nil or IsSecret(name) then
+        name = spellID and SpellName(spellID) or "?"
+    end
+    if type(name) ~= "string" then name = "?" end
+
+    -- Duration: skip if either endpoint is secret or non-numeric.
     local dur = ""
-    if info and info.startMS and info.endMS then
-        dur = string.format(" dur=%d", info.endMS - info.startMS)
+    if info and info.startMS and info.endMS
+        and not IsSecret(info.startMS) and not IsSecret(info.endMS)
+        and type(info.startMS) == "number" and type(info.endMS) == "number"
+    then
+        local ok, v = pcall(function() return info.endMS - info.startMS end)
+        if ok and type(v) == "number" then
+            dur = string.format(" dur=%d", v)
+        end
     end
 
     local nint = ""
-    if info and info.notInterruptible ~= nil then
-        nint = string.format(" nint=%s", tostring(info.notInterruptible))
+    if info and info.notInterruptible ~= nil and not IsSecret(info.notInterruptible) then
+        nint = " nint=" .. SafeStr(info.notInterruptible)
     end
 
-    local src = info and (" src=" .. info.source) or ""
+    local src = ""
+    if info and type(info.source) == "string" then
+        src = " src=" .. info.source
+    end
 
     return string.format(
         "[CAST] ev=%s unit=%s spellID=%s name=%q%s%s%s",
-        ev, unit, tostring(spellID or "?"), name or "?", dur, nint, src
+        SafeStr(ev), SafeStr(unit),
+        (spellID and not IsSecret(spellID)) and tostring(spellID) or "?",
+        name, dur, nint, src
     )
 end
 
@@ -176,7 +223,17 @@ local function OnCastEvent(event, unit, _, spellIDFromEvent)
     -- to the event's spellID arg.
     local info = ReadCastInfo(unit) or ReadChannelInfo(unit)
 
-    Log:Log("DEBUG", FormatLine(ev, unit, info, spellIDFromEvent))
+    -- Wrap FormatLine + Log:Log in pcall. In Midnight, nameplate spellIDs can
+    -- arrive as "secret values" that break string.format %s / tostring deep
+    -- inside Blizzard's C code. Without this guard, a single tainted event
+    -- throws at the OnEvent boundary and the whole emit is silently dropped.
+    local ok, line = pcall(FormatLine, ev, unit, info, spellIDFromEvent)
+    if ok and line then
+        Log:Log("DEBUG", line)
+    else
+        Log:Log("DEBUG", string.format(
+            "[CAST] ev=%s unit=%s (format-err: secret value)", ev, tostring(unit)))
+    end
 end
 
 ------------------------------------------------------------------------
