@@ -1,5 +1,32 @@
 # HexCD Changelog
 
+## v1.6.1
+
+### Kickable-cast TTS gate (Midnight 12.0 nameplate workaround)
+- New `CastDetector` module listens to `UNIT_SPELLCAST_*` on hostile nameplates and maintains a per-cast kickable state machine (`START` / `NOT_INTERRUPTIBLE` / `INTERRUPTIBLE` / `STOP` transitions)
+- Works around Blizzard's Midnight restriction where nameplate spellIDs arrive as secret-tainted values that survive all known laundering tricks — we can't identify *what* is being cast, but we can track *whether it's kickable right now*
+- `KickTracker:CheckAlert` now gates TTS on `CastDetector:HasActiveKickableCast()` (new `kickRequireActiveCast = true` config, default on) — suppresses "ready to kick" spam during idle rotation churn; alerts fire only when there's something to actually interrupt
+- KickTracker registers as a CastDetector listener, so a fresh kickable cast on a nameplate also triggers re-check (not just rotation advances)
+- Taint-hardened: every field from `UnitCastingInfo` / `UnitChannelInfo` / event payload guarded by `IsSecret` before any arithmetic, `tostring`, or `%s` format — prevents the "tainted by HexCD" 736x error spam seen in early Midnight builds
+- DEBUG-level observability of state transitions and gate decisions (`CastDetector: kickable START nameplateN`, `KickTracker: alert allowed/skipped`)
+
+### Paladin Divine Protection dedup
+- Removed `403876` (Ret variant) from AuraRules Ret Paladin block — it was the primary source of pre-population alongside baseline `498`, causing Ret paladins to show two identical "Divine Protection" icons
+- AuraDetector still picks up `403876` live if the player has the talent and casts it in combat
+- `SpellDB.lua`: marked `403876` as `talentOnly = true` so CommSync's secondary pass respects talent cache
+- Regression test in `test_prepop_spec_gate.lua` asserts Ret gets exactly one baseline Divine Protection entry
+
+### Warrior CC visibility
+- `Shockwave (46968)` and `Storm Bolt (107570)` ungated from `talentOnly` — now pre-populate for every warrior regardless of talent inspection state. The CD only becomes visually active when the spell is actually cast, so untalented warriors see nothing extra
+
+### Debug log readability
+- Chat emissions in `DebugLog:Log` now sanitize em-dash `—` → `-` and right arrow `→` → `->` (WoW's default chat font renders these as boxes). The ring buffer and text exports preserve original Unicode
+- `CastDetector` at DEBUG level now logs only kickable-relevant events (`START` / `CHANNEL_START` / `INTERRUPTED` / `INTERRUPTIBLE` / `NOT_INTERRUPTIBLE`). Noisy `SUCCEEDED` / `STOP` / `CHANNEL_STOP` / `FAILED` / `DELAYED` events still update the state machine but are gated to TRACE level — cuts M+ pull log volume by ~10x
+
+### Top-parse CD plans
+- **Pit of Saron +21**: updated to match the current #1 Resto Druid parse (109k HPS). NS+Convoke macro on every boss pull, Tranq mid-Garfrost (130s) and Ick/Krick opener (25s), zero Tranq on Tyrannus (pure Convoke cycles cover Festering Pulse). Tree of Life dropped entirely.
+- **Windrunner Spire +20**: updated to match the current #1 Resto Druid parse (122k HPS). No Tree, no Tranq on Kroluk or Restless Heart, heavy Ironbark/Ursol's Vortex cycling on melee-heavy bosses. Kroluk plan avoids BigWigs anchors (Rallying Bellow has no bar — HP-threshold).
+
 ## v1.6.0
 
 ### Spec audit (13 classes)

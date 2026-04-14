@@ -4,7 +4,7 @@
 HexCD = HexCD or {}
 
 local ADDON_NAME = "HexCD"
-local VERSION = "1.5.3"
+local VERSION = "1.6.1"
 
 local Config = HexCD.Config
 local Log = HexCD.DebugLog
