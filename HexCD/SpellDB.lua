@@ -50,7 +50,7 @@ local PERSONAL = {
     [243435] = { name = "Fortifying Brew",      cd = 180, class = "MONK", specs = {269, 270} }, -- WW/MW baseline (BrM uses 115203 variant)
     -- Paladin
     [642]    = { name = "Divine Shield",        cd = 300, class = "PALADIN", immune = true },
-    [498]    = { name = "Divine Protection",    cd = 60,  class = "PALADIN", specs = {65, 66} }, -- Holy/Prot only; Ret uses 403876 variant (90s CD)
+    [498]    = { name = "Divine Protection",    cd = 60,  class = "PALADIN" }, -- baseline all specs including Ret; 403876 is the talent variant (below)
     [184662] = { name = "Shield of Vengeance",  cd = 90,  class = "PALADIN", specs = {70} },  -- Ret baseline
     -- Priest
     [19236]  = { name = "Desperate Prayer",     cd = 90,  class = "PRIEST" },
@@ -100,7 +100,7 @@ local PERSONAL = {
     -- not a damage-reduction defensive.
     [86659]  = { name = "Guardian of Ancient Kings", cd = 300, class = "PALADIN", specs = {66} },
     [389539] = { name = "Sentinel",              cd = 120, class = "PALADIN", specs = {66}, talentOnly = true }, -- Prot talent replacing Avenging Wrath (30% DR + 15% max HP stacks)
-    [403876] = { name = "Divine Protection (Ret)", cd = 90, class = "PALADIN", specs = {70} },
+    [403876] = { name = "Divine Protection (Ret)", cd = 90, class = "PALADIN", specs = {70}, talentOnly = true }, -- talent variant; surfaced live by AuraDetector so Ret without the talent sees only 498
     -- Priest (spec-specific)
     -- NOTE: Voidform (228260) moved to OFFENSIVE — DPS ramp CD, not defensive.
     -- Death Knight (spec-specific)
