@@ -375,8 +375,8 @@ local CC = {
     [2094]   = { name = "Blind",                cd = 120, class = "ROGUE" }, -- baseline (ST 60s disorient; damage interrupts)
     [5484]   = { name = "Howl of Terror",       cd = 40,  class = "WARLOCK", talentOnly = true }, -- class talent (AoE 20s fear, 5 targets)
     [6789]   = { name = "Mortal Coil",          cd = 45,  class = "WARLOCK", talentOnly = true }, -- class talent (ST 3s horror + 20% max HP self-heal)
-    [107570] = { name = "Storm Bolt",           cd = 30,  class = "WARRIOR", talentOnly = true }, -- class talent (ST 4s stun)
-    [46968]  = { name = "Shockwave",            cd = 35,  class = "WARRIOR", talentOnly = true }, -- talent (cone 2s AoE stun; primarily Prot)
+    [107570] = { name = "Storm Bolt",           cd = 30,  class = "WARRIOR" }, -- class talent (ST 4s stun) — pre-pop for all warriors; CD only surfaces when actually cast
+    [46968]  = { name = "Shockwave",            cd = 35,  class = "WARRIOR" }, -- talent (cone 2s AoE stun; primarily Prot) — pre-pop so CC is visible without waiting for inspection
     [19577]  = { name = "Intimidation",         cd = 60,  class = "HUNTER", specs = {253, 255}, talentOnly = true }, -- BM/Surv talent (pet-cast 5s stun)
     [109248] = { name = "Binding Shot",         cd = 45,  class = "HUNTER", talentOnly = true }, -- class talent (AoE tether-into-3s-stun on movement)
     [108194] = { name = "Asphyxiate",           cd = 45,  class = "DEATHKNIGHT", specs = {251, 252}, talentOnly = true }, -- Frost/Unholy talent (ST 4s stun)

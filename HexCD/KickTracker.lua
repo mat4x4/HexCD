@@ -536,6 +536,16 @@ function KT:Init()
     end
     KT:AutoEnroll()
 
+    -- Subscribe to CastDetector: whenever a nameplate cast becomes kickable,
+    -- re-check alert. This catches the "you're up, something's casting RIGHT
+    -- NOW" timing that a rotation-advance trigger alone can miss when a cast
+    -- starts mid-cooldown. ALERT_DEBOUNCE_SEC prevents chain-firing on bursts.
+    if HexCD.CastDetector and HexCD.CastDetector.OnKickableStart then
+        HexCD.CastDetector:OnKickableStart("KickTracker", function(_unit)
+            KT:CheckAlert()
+        end)
+    end
+
     Log:Log("DEBUG", "KickTracker initialized")
 end
 
@@ -865,6 +875,19 @@ function KT:CheckAlert()
     if not ready then
         Log:Log("DEBUG", string.format("KickTracker: alert skipped — CD not ready (%.1fs remaining)", remaining))
         return
+    end
+
+    -- Gate on an active kickable cast. We can't read mob spellIDs on Midnight
+    -- nameplates (all secret-tainted), so we rely on CastDetector's state
+    -- machine: UNIT_SPELLCAST_START/INTERRUPTIBLE mark a nameplate kickable,
+    -- NOT_INTERRUPTIBLE/STOP/etc clear it. This suppresses TTS during idle
+    -- rotation churn — alerts only when there's something to actually kick.
+    if Config:Get("kickRequireActiveCast") ~= false then
+        local CD = HexCD.CastDetector
+        if CD and CD.HasActiveKickableCast and not CD:HasActiveKickableCast() then
+            Log:Log("DEBUG", "KickTracker: alert skipped — no active kickable cast")
+            return
+        end
     end
 
     local now = GetTime()

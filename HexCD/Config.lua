@@ -30,6 +30,10 @@ local DEFAULTS = {
     kickEnabled = true,
     kickRotation = {},
     kickAlertEnabled = true,
+    -- Only fire TTS when CastDetector reports an active kickable cast on a
+    -- hostile nameplate. Suppresses "ready to kick" spam during idle rotation
+    -- churn. Set to false to restore pre-12.0 always-fire behavior.
+    kickRequireActiveCast = true,
     kickAnchorPoint = "CENTER",
     kickAnchorX = -300,
     kickAnchorY = 0,

@@ -142,11 +142,11 @@ HexCD.AuraRules = {
                 BigDefensive = true, ExternalDefensive = false, Important = true,
                 RequiresEvidence = { "Cast", "Flags" }, CanCancelEarly = true,
             }, -- Divine Shield
-            {
-                BuffDuration = 8, Cooldown = 90, SpellId = 403876,
-                Important = true, ExternalDefensive = false, BigDefensive = false,
-                RequiresEvidence = { "Cast", "Shield" },
-            }, -- Divine Protection (90s base for Ret)
+            -- Divine Protection (Ret variant, 403876) intentionally omitted.
+            -- It's the talent-only 90s version; including it here caused Ret
+            -- players to pre-populate BOTH 498 (baseline) and 403876, showing
+            -- two "Divine Protection" icons. AuraDetector still picks up 403876
+            -- live if the player has the talent and casts it.
             {
                 BuffDuration = 10, Cooldown = 300, SpellId = 204018,
                 ExternalDefensive = true, BigDefensive = false, Important = false,
