@@ -50,7 +50,7 @@ local PERSONAL = {
     [243435] = { name = "Fortifying Brew",      cd = 180, class = "MONK", specs = {269, 270} }, -- WW/MW baseline (BrM uses 115203 variant)
     -- Paladin
     [642]    = { name = "Divine Shield",        cd = 300, class = "PALADIN", immune = true },
-    [498]    = { name = "Divine Protection",    cd = 60,  class = "PALADIN" },
+    [498]    = { name = "Divine Protection",    cd = 60,  class = "PALADIN", specs = {65, 66} }, -- Holy/Prot only; Ret uses 403876 variant (90s CD)
     [184662] = { name = "Shield of Vengeance",  cd = 90,  class = "PALADIN", specs = {70} },  -- Ret baseline
     -- Priest
     [19236]  = { name = "Desperate Prayer",     cd = 90,  class = "PRIEST" },
