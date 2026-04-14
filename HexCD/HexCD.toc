@@ -4,6 +4,7 @@
 ## Author: Hex
 ## Version: @project-version@
 ## X-Wago-ID: rNkyYlKa
+## X-Curse-Project-ID: 1513632
 ## SavedVariables: HexCDDB
 
 Util.lua

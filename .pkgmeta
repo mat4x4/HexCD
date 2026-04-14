@@ -1,7 +1,5 @@
 package-as: HexCD
 
-curse-project-id: 1513632
-
 enable-nolib-creation: no
 
 manual-changelog:
