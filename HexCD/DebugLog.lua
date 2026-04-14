@@ -73,11 +73,17 @@ function Log:Log(level, msg)
         }
     end
 
-    -- Also print to chat if DEBUG or TRACE
+    -- Also print to chat if DEBUG or TRACE.
+    -- WoW's default chat font (FrizQuadrataTT) doesn't render a handful of
+    -- non-ASCII glyphs we use in log messages — em-dash and arrows render as
+    -- boxes. Player names with Latin-Extended (ä, ê) are fine.
     if numLevel >= LOG_LEVELS.DEBUG then
         local prefix = "|cFF00CCFF[HexCD]|r "
         local timeStr = fightRel and string.format("[%.1fs] ", fightRel) or ""
-        DEFAULT_CHAT_FRAME:AddMessage(prefix .. timeStr .. level .. ": " .. msg)
+        local chatMsg = msg
+            :gsub("\226\128\148", "-")  -- em-dash U+2014
+            :gsub("\226\134\146", "->") -- right arrow U+2192
+        DEFAULT_CHAT_FRAME:AddMessage(prefix .. timeStr .. level .. ": " .. chatMsg)
     end
 end
 
