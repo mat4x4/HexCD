@@ -223,7 +223,19 @@ local activeCasts = {}   -- [unitToken] = { kickable = bool, startTime = n }
 local listeners = {}     -- ordered list of {owner, callback} for kickable starts
 local STALE_CAST_SEC = 30  -- discard entries that never got a matching STOP
 
+local function CountKickable()
+    local total, kickable = 0, 0
+    for _, e in pairs(activeCasts) do
+        total = total + 1
+        if e.kickable then kickable = kickable + 1 end
+    end
+    return kickable, total
+end
+
 local function NotifyKickableStart(unit)
+    Log:Log("DEBUG", string.format(
+        "CastDetector: kickable START %s (active now: %d/%d)",
+        tostring(unit), select(1, CountKickable()), select(2, CountKickable())))
     for _, entry in ipairs(listeners) do
         local ok, err = pcall(entry.callback, unit)
         if not ok then
@@ -241,18 +253,32 @@ local function SetKickable(unit, kickable, reason)
         -- first START event we see (e.g. we joined combat mid-cast). Create
         -- a lazy entry so the state survives until STOP.
         activeCasts[unit] = { kickable = kickable, startTime = GetTime() }
+        Log:Log("DEBUG", string.format(
+            "CastDetector: implicit %s on %s → kickable=%s (reason=%s)",
+            kickable and "START" or "SHIELD", tostring(unit),
+            tostring(kickable), tostring(reason)))
         if kickable then NotifyKickableStart(unit) end
         return
     end
     local prev = entry.kickable
     entry.kickable = kickable
+    if prev ~= kickable then
+        Log:Log("DEBUG", string.format(
+            "CastDetector: %s %s → kickable %s→%s",
+            tostring(reason), tostring(unit),
+            tostring(prev), tostring(kickable)))
+    end
     if kickable and not prev then
         NotifyKickableStart(unit)
     end
-    _ = reason  -- reserved for future debug
 end
 
 local function ClearCast(unit)
+    if activeCasts[unit] then
+        Log:Log("DEBUG", string.format(
+            "CastDetector: cleared %s (remaining active: %d)",
+            tostring(unit), select(2, CountKickable()) - 1))
+    end
     activeCasts[unit] = nil
 end
 
@@ -269,10 +295,11 @@ end
 --- True if any hostile nameplate currently has an active cast marked kickable.
 function CD:HasActiveKickableCast()
     ReapStale()
-    for _, entry in pairs(activeCasts) do
-        if entry.kickable then return true end
-    end
-    return false
+    local kickable, total = CountKickable()
+    Log:Log("DEBUG", string.format(
+        "CastDetector: HasActiveKickableCast() = %s (%d kickable / %d active)",
+        tostring(kickable > 0), kickable, total))
+    return kickable > 0
 end
 
 --- Subscribe to "a nameplate cast just became kickable" events.

@@ -884,9 +884,13 @@ function KT:CheckAlert()
     -- rotation churn — alerts only when there's something to actually kick.
     if Config:Get("kickRequireActiveCast") ~= false then
         local CD = HexCD.CastDetector
-        if CD and CD.HasActiveKickableCast and not CD:HasActiveKickableCast() then
-            Log:Log("DEBUG", "KickTracker: alert skipped — no active kickable cast")
-            return
+        if CD and CD.HasActiveKickableCast then
+            local hasKickable = CD:HasActiveKickableCast()
+            if not hasKickable then
+                Log:Log("DEBUG", "KickTracker: alert skipped — no active kickable cast")
+                return
+            end
+            Log:Log("DEBUG", "KickTracker: alert allowed — kickable cast active")
         end
     end
 
