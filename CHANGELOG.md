@@ -1,5 +1,24 @@
 # HexCD Changelog
 
+## v1.6.2
+
+### Per-bar visibility toggles
+- Each tracker bar now has its own "Show this bar" checkbox in Settings → Trackers: Personal Defensives, External Defensives, Utility, Healing CDs, Offensive CDs, Crowd Control
+- Bars hide immediately on toggle (no 0.25s wait) via `PCD:RefreshVisibility()`
+- Kicks and Dispels already had enable toggles — unchanged
+
+### Difficulty mapping fix
+- Fixed a spurious "No plan for difficulty 15, using difficulty 4 plan" warning that fired on every Heroic raid pull. WoW sends difficultyID=15 (Heroic Flex), plans use internal ID 4 (Heroic) — the comparison was in different namespaces. Now maps WoW's ID before comparing via `Config:MapDifficulty()`
+
+### PlanData export path fix
+- CD plan exports now correctly target `addons/HexCD_Reminder/PlanData.lua` (the addon that actually loads plans). Previous exports went to `addons/HexCD/PlanData.lua` which is never loaded by the .toc. This fixes Maisara Caverns showing "LEGACY (fixed sections)" + "Dynamic planner returned no plan" despite having a fully dynamic plan in the knowledge files.
+
+### Warrior CC visibility
+- Shockwave (46968) and Storm Bolt (107570) ungated from `talentOnly` — pre-populate for all warriors regardless of inspection state
+
+### Paladin Divine Protection dedup
+- Removed 403876 (Ret variant) from AuraRules Ret Paladin block — was the primary source of duplicate "Divine Protection" icons on Ret paladins. AuraDetector still picks up 403876 live if the talent is actually cast
+
 ## v1.6.1
 
 ### Kickable-cast TTS gate (Midnight 12.0 nameplate workaround)
