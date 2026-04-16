@@ -50,14 +50,18 @@ local function CreateSettingsSlider(parent, label, min, max, step, configKey, yO
     return container
 end
 
-local function CreateSettingsCheckbox(parent, label, configKey, yOffset)
+local function CreateSettingsCheckbox(parent, label, configKey, yOffset, onChange)
     local cb = CreateFrame("CheckButton", "HexCD_" .. configKey, parent, "InterfaceOptionsCheckButtonTemplate")
     cb:SetPoint("TOPLEFT", parent, "TOPLEFT", 16, yOffset)
     local t = cb:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
     t:SetPoint("LEFT", cb, "RIGHT", 4, 0)
     t:SetText(label)
     cb:SetChecked(Config:Get(configKey) and true or false)
-    cb:SetScript("OnClick", function(self) Config:Set(configKey, self:GetChecked() and true or false) end)
+    cb:SetScript("OnClick", function(self)
+        local v = self:GetChecked() and true or false
+        Config:Set(configKey, v)
+        if onChange then onChange(v) end
+    end)
     return cb
 end
 
@@ -446,6 +450,12 @@ local function PopulatePartyCDTab(scrollChild)
     -- ── Header + Test ──
     CreateSectionHeader(scrollChild, "Personal Defensives", y)
 
+    -- Enable toggle for the entire Personal Defensives display.
+    -- Hides unit-frame icons immediately when unchecked.
+    CreateSettingsCheckbox(scrollChild, "Show Personal Defensives on unit frames",
+        "hexcd_personal_enabled", y - 22,
+        function() if PCD and PCD.RefreshVisibility then PCD:RefreshVisibility() end end)
+
     local testActive = false
     local testBtn = CreateFrame("Button", nil, scrollChild, "UIPanelButtonTemplate")
     testBtn:SetSize(80, 22)
@@ -464,7 +474,7 @@ local function PopulatePartyCDTab(scrollChild)
         end
     end)
 
-    y = y - 30
+    y = y - 55  -- room for the section header + enable checkbox row
 
     -- ── Position ──
     CreateSectionHeader(scrollChild, "Position", y)
@@ -810,6 +820,13 @@ local function CreateMainFrame()
             local y = 0
             CreateSectionHeader(scrollChild, label, y)
             y = y - 25
+
+            -- Enable toggle per bar. Hides this bar immediately when unchecked.
+            -- Key format matches Config.lua defaults: hexcd_<slug>_enabled.
+            CreateSettingsCheckbox(scrollChild, "Show this bar",
+                "hexcd_" .. slug .. "_enabled", y,
+                function() if PCD and PCD.RefreshVisibility then PCD:RefreshVisibility() end end)
+            y = y - 28
 
             -- Lock/Unlock (color matches sidebar)
             if PCD then

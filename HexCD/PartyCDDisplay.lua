@@ -44,6 +44,25 @@ local FLOATING_TITLES = {
     CC                 = "|cFFCC44CCCrowd Control|r",
 }
 
+-- Map SpellDB category → config enable key. Used to gate each bar on/off
+-- from the Settings tab; default true means existing users see no change.
+local CATEGORY_ENABLE_KEY = {
+    PERSONAL           = "hexcd_personal_enabled",
+    EXTERNAL_DEFENSIVE = "hexcd_external_enabled",
+    UTILITY            = "hexcd_utility_enabled",
+    HEALING            = "hexcd_healing_enabled",
+    OFFENSIVE          = "hexcd_offensive_enabled",
+    CC                 = "hexcd_cc_enabled",
+}
+
+local function IsCategoryEnabled(category)
+    local key = CATEGORY_ENABLE_KEY[category]
+    if not key then return true end
+    local v = HexCDDB and HexCDDB[key]
+    if v == nil then return true end -- default on
+    return v == true
+end
+
 ------------------------------------------------------------------------
 -- Unit Frame detection (Danders, Cell, ElvUI, Blizzard)
 ------------------------------------------------------------------------
@@ -734,9 +753,18 @@ local function UpdateDisplay()
         end
     end
 
-    UpdatePersonalBars(partyCD, now)
+    if IsCategoryEnabled("PERSONAL") then
+        UpdatePersonalBars(partyCD, now)
+    else
+        HideAllPersonal()
+    end
     for _, cat in ipairs(FLOATING_CATEGORIES) do
-        UpdateFloatingBar(cat, partyCD, now)
+        if IsCategoryEnabled(cat) then
+            UpdateFloatingBar(cat, partyCD, now)
+        else
+            local bar = floatingBars[cat]
+            if bar and bar:IsShown() then bar:Hide() end
+        end
     end
 end
 
@@ -784,6 +812,25 @@ end
 
 function PCD:IsVisible()
     return isVisible
+end
+
+--- Called from ConfigGUI when a per-category enable toggle flips. Hides
+--- bars that just got turned off and re-draws the rest. Cheaper than
+--- waiting for the 0.25s OnUpdate cycle.
+function PCD:RefreshVisibility()
+    if not IsCategoryEnabled("PERSONAL") then
+        HideAllPersonal()
+    end
+    for _, cat in ipairs(FLOATING_CATEGORIES) do
+        if not IsCategoryEnabled(cat) then
+            local bar = floatingBars[cat]
+            if bar and bar:IsShown() then bar:Hide() end
+        end
+    end
+    if isVisible and updateFrame then
+        -- Force a full redraw so re-enabled categories pop back immediately.
+        UpdateDisplay()
+    end
 end
 
 function PCD:ResetDebug()

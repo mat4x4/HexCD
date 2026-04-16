@@ -26,6 +26,15 @@ local DEFAULTS = {
     dispelAnchorX2 = 300,
     dispelAnchorY2 = -80,
 
+    -- PartyCDDisplay bars — per-category visibility toggles.
+    -- Default all true; users hide individual bars via the Settings tab.
+    hexcd_personal_enabled  = true,  -- Personal defensives (anchored to unit frames)
+    hexcd_external_enabled  = true,  -- External Defensives floating bar
+    hexcd_utility_enabled   = true,  -- Utility floating bar
+    hexcd_healing_enabled   = true,  -- Healing CDs floating bar
+    hexcd_offensive_enabled = true,  -- Offensive CDs floating bar
+    hexcd_cc_enabled        = true,  -- Crowd Control floating bar
+
     -- Kick Tracker
     kickEnabled = true,
     kickRotation = {},
