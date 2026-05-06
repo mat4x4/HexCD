@@ -167,6 +167,10 @@ end
 
 local BAR_POOL_SIZE = 6
 local ALERT_DEBOUNCE_SEC = 2
+-- Fire the alert this many seconds before the CD is fully ready so the
+-- player has time to react. The kickable-cast gate still applies, so
+-- alerts only fire when there's actually something to interrupt.
+local ALERT_LEADTIME_SEC = 1.5
 local UPDATE_THROTTLE = 0.2
 local ADDON_MSG_PREFIX = "HexCD"
 local commsRegistered = false
@@ -910,10 +914,10 @@ function KT:CheckAlert()
     local playerName = UnitName("player")
     if entry.name ~= playerName then return end
 
-    -- Only alert if CD is ready
-    local ready, remaining = IsKickerReady(activeIdx)
-    if not ready then
-        Log:Log("DEBUG", string.format("KickTracker: alert skipped — CD not ready (%.1fs remaining)", remaining))
+    -- Only alert if CD is ready, or close enough to be worth pre-alerting
+    local _, remaining = IsKickerReady(activeIdx)
+    if remaining > ALERT_LEADTIME_SEC then
+        Log:Log("DEBUG", string.format("KickTracker: alert skipped — CD not ready (%.1fs remaining, leadtime=%.1fs)", remaining, ALERT_LEADTIME_SEC))
         return
     end
 
@@ -1075,8 +1079,11 @@ HandleKickByName = function(casterName, spellID, groupIdx, source)
         if state and state.readyTime then
             local remaining = state.readyTime - GetTime()
             if remaining > 0 then
-                C_Timer.After(remaining + 0.1, function()
-                    Log:Log("DEBUG", "KickTracker: CD expired timer — re-checking alert")
+                -- Schedule the re-check ALERT_LEADTIME_SEC before ready so
+                -- the alert fires with lead time, not after CD expiry.
+                local delay = math.max(0, remaining - ALERT_LEADTIME_SEC)
+                C_Timer.After(delay, function()
+                    Log:Log("DEBUG", "KickTracker: leadtime timer — re-checking alert")
                     KT:CheckAlert()
                 end)
             end

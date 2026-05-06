@@ -59,6 +59,10 @@ local DISPELLER_BAR_POOL_SIZE = 6
 local DEBUFF_ENTRY_POOL_SIZE = 8
 local INACTIVE_FADE_SEC = 3
 local ALERT_DEBOUNCE_SEC = 3   -- min seconds between any TTS alert
+-- Fire the alert this many seconds before the CD is fully ready, so the
+-- player has time to react. Combined with the debounce + alertedForCurrentDebuffs
+-- flag this still fires at most once per debuff wave.
+local ALERT_LEADTIME_SEC = 1.5
 local alertedForCurrentDebuffs = false  -- true = already alerted, don't repeat until we dispel
 local UPDATE_THROTTLE = 0.2
 local ADDON_MSG_PREFIX = "HexCD"
@@ -680,9 +684,9 @@ function DT:CheckAlert()
     local playerName = UnitName("player")
     if entry.name ~= playerName then return end
 
-    -- Only alert if CD is ready
-    local ready, remaining = IsDispellerReady(activeIdx)
-    if not ready then return end
+    -- Only alert if CD is ready, or close enough to be worth pre-alerting
+    local _, remaining = IsDispellerReady(activeIdx)
+    if remaining > ALERT_LEADTIME_SEC then return end
 
     -- Only alert if someone actually has a dispellable debuff
     local hasDebuff, debuffUnit = AnyDispellableDebuff()
@@ -818,8 +822,11 @@ local function HandleDispelByName(casterName, spellID, groupIdx)
         if state and state.readyTime then
             local remaining = state.readyTime - GetTime()
             if remaining > 0 then
-                C_Timer.After(remaining + 0.1, function()
-                    Log:Log("DEBUG", "DispelTracker: CD expired timer — re-checking alert")
+                -- Schedule the re-check ALERT_LEADTIME_SEC before ready so
+                -- the alert fires with lead time, not after CD expiry.
+                local delay = math.max(0, remaining - ALERT_LEADTIME_SEC)
+                C_Timer.After(delay, function()
+                    Log:Log("DEBUG", "DispelTracker: leadtime timer — re-checking alert")
                     DT:CheckAlert()
                 end)
             end
