@@ -21,6 +21,7 @@ HexCD.AuraDetector = {}
 local AD = HexCD.AuraDetector
 local Log = HexCD.DebugLog
 local Config = HexCD.Config
+local Util = HexCD.Util
 
 ------------------------------------------------------------------------
 -- Detection rules (MiniCC-compatible schema)
@@ -171,6 +172,12 @@ local castFastPath = {}
 local function BuildEvidence(unit, now)
     local ev = {}
     if lastCastTime[unit] and math.abs(lastCastTime[unit] - now) <= EVIDENCE_WINDOW then
+        ev.Cast = true
+    elseif Util and Util.NoCastSucceeded and Util.NoCastSucceeded() and unit ~= "player" then
+        -- 12.0.5+: UNIT_SPELLCAST_SUCCEEDED no longer fires for non-player
+        -- units, so real Cast evidence can never be recorded for teammates.
+        -- Mirror MiniCC's Brain.lua: grant synthetic Cast=true so rules with
+        -- RequiresEvidence="Cast" still match for non-local candidates.
         ev.Cast = true
     end
     if lastShieldTime[unit] and math.abs(lastShieldTime[unit] - now) <= EVIDENCE_WINDOW then

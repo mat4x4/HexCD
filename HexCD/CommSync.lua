@@ -128,6 +128,16 @@ local function OnEvent(self, event, ...)
             and HexCD.Util.IsOtherGroupMemberUnit(unit)
             or (unit == "party1" or unit == "party2" or unit == "party3" or unit == "party4")
         if isPartyUnit then
+            -- 12.0.5+ degraded path: UNIT_SPELLCAST_SUCCEEDED no longer
+            -- fires for non-player units, so this entire branch is dead
+            -- code on Midnight 12.0.5+. AuraDetector's synthetic Cast
+            -- evidence (BuildEvidence in AuraDetector.lua) and the kick/
+            -- dispel rotation-advance fallbacks compensate for the lost
+            -- attribution. Leave the branch in place so pre-12.0.5
+            -- clients (and any future Blizzard reversal) keep working.
+            if HexCD.Util and HexCD.Util.NoCastSucceeded and HexCD.Util.NoCastSucceeded() then
+                return
+            end
             pcall(function()
                 local n = UnitName(unit)
                 if not n or (issecretvalue and issecretvalue(n)) then return end

@@ -59,7 +59,7 @@ local DEFAULTS = {
     hexcd_tts_enabled = true,     -- master TTS toggle
     ttsVoiceName = "",            -- empty = auto-detect (Amy → first available)
     ttsRate = 3,                  -- speech rate 1-10
-    ttsVolume = 100,              -- volume 0-100
+    ttsVolume = 200,              -- volume 0-300 (WoW's SpeakText accepts >100)
     -- Legacy keys (kept for backward compat)
     dispelAlertText = "Dispel",
     kickAlertText = "Kick",

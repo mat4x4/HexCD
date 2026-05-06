@@ -1,4 +1,4 @@
-## Interface: 120001
+## Interface: 120005, 120001
 ## Title: HexCD
 ## Notes: WoW Cooldown Tracker — party & raid CD sync, defensives, healing CDs, dispel/kick rotation
 ## Author: Hex

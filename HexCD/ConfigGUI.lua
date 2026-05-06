@@ -364,7 +364,7 @@ local function BuildTrackerAlertSection(scrollChild, trackerSlug, y)
     CreateSettingsSlider(scrollChild, "Rate override (0 = global)", 0, 10, 1, "hexcd_" .. trackerSlug .. "_ttsRate", y)
     y = y - 55
 
-    CreateSettingsSlider(scrollChild, "Volume override (0 = global)", 0, 100, 5, "hexcd_" .. trackerSlug .. "_ttsVolume", y)
+    CreateSettingsSlider(scrollChild, "Volume override (0 = global)", 0, 300, 10, "hexcd_" .. trackerSlug .. "_ttsVolume", y)
     y = y - 55
 
     local saveBtn = CreateFrame("Button", nil, scrollChild, "UIPanelButtonTemplate")
@@ -1033,7 +1033,7 @@ local function CreateMainFrame()
         y = y - 55
         CreateSettingsSlider(scrollChild, "Default Rate", 1, 10, 1, "ttsRate", y)
         y = y - 55
-        CreateSettingsSlider(scrollChild, "Default Volume", 0, 100, 5, "ttsVolume", y)
+        CreateSettingsSlider(scrollChild, "Default Volume", 0, 300, 10, "ttsVolume", y)
         y = y - 55
 
         -- Debug

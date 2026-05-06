@@ -8,6 +8,42 @@ HexCD.Util = {}
 local Util = HexCD.Util
 
 ------------------------------------------------------------------------
+-- Patch detection
+-- 12.0.5 (Apr 21 2026) removed UNIT_SPELLCAST_SUCCEEDED for any unit
+-- other than "player". Modules that previously attributed teammate
+-- casts via that event must fall back to aura-based evidence on
+-- 12.0.5+. Util.NoCastSucceeded() is the canonical gate; tests can
+-- override it via Util._SimulateNoCastSucceeded(bool).
+------------------------------------------------------------------------
+
+do
+    local toc = 0
+    if type(GetBuildInfo) == "function" then
+        local ok, _, _, _, ver = pcall(GetBuildInfo)
+        if ok and type(ver) == "number" then
+            toc = ver
+        end
+    end
+    Util.BUILD_PATCH = toc
+    Util.PATCH_12_0_5 = toc >= 120005
+end
+
+local simulateNoCastSucceeded = nil  -- nil = use real build, bool = override
+
+--- True when UNIT_SPELLCAST_SUCCEEDED no longer fires for non-player units.
+--- @return boolean
+function Util.NoCastSucceeded()
+    if simulateNoCastSucceeded ~= nil then return simulateNoCastSucceeded end
+    return Util.PATCH_12_0_5
+end
+
+--- Test-only override. Pass nil to clear and fall back to the real build.
+--- @param value boolean?
+function Util._SimulateNoCastSucceeded(value)
+    simulateNoCastSucceeded = value
+end
+
+------------------------------------------------------------------------
 -- Group state helpers (consistent across party / instance group / raid)
 -- WoW has two group categories:
 --   LE_PARTY_CATEGORY_HOME     (1 or nil) — normal invite

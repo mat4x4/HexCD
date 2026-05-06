@@ -209,6 +209,11 @@ local pendingCasts = {}       -- [unit] = GetTime()
 local pendingInterrupts = {}  -- [nameplateUnit] = GetTime()
 local correlPending = false
 local CORREL_WINDOW = 0.200   -- 200ms match window (50ms was too tight in practice)
+-- 12.0.5+: when UNIT_SPELLCAST_SUCCEEDED stops firing for non-player units,
+-- correlation is impossible. Track the player's most recent self-kick so
+-- the degraded "anonymous-advance" branch can skip the interrupt that the
+-- player demonstrably caused (Layer 1 already credited them).
+local lastPlayerKickTime = 0
 
 local function ProcessCorrelation()
     correlPending = false
@@ -269,6 +274,21 @@ local function ProcessCorrelation()
             end
         end
         return  -- Already cleaned up
+    elseif Util.NoCastSucceeded() and KT._anonymousAdvance then
+        -- 12.0.5+: UNIT_SPELLCAST_SUCCEEDED no longer fires for teammates,
+        -- so correlation can never match. Best-guess: credit the current
+        -- rotation slot of each active group. Skip if the player just
+        -- self-cast a kick (Layer 1 already credited them, and crediting
+        -- a non-player current slot for the same physical event would be
+        -- incorrect).
+        local now = GetTime()
+        local skipPlayerJustKicked = (now - lastPlayerKickTime) <= CORREL_WINDOW
+        if skipPlayerJustKicked then
+            Log:Log("DEBUG", "KickCorrel: skipping anon-advance (player self-kick in window)")
+        else
+            Log:Log("DEBUG", "KickCorrel: no cast match — anon-advance (12.0.5+ degraded)")
+            KT:_anonymousAdvance()
+        end
     else
         Log:Log("DEBUG", "KickCorrel: no cast matched within time window")
     end
@@ -456,6 +476,26 @@ function KT:_correlRoute(shortName, bestUnit)
         end
         kickRotation = groups[1].rotation
         HandleKickByName(shortName, spellID, 1, "correlated")
+    end
+end
+
+--- 12.0.5+ degraded mode: an interrupt was observed on a nameplate but no
+--- cast event can attribute it. Credit the current rotation slot of each
+--- active group as the kicker, using their resolved kick spell.
+function KT:_anonymousAdvance()
+    for gi = 1, MAX_GROUPS do
+        local gs = groups[gi]
+        local entry = gs.rotation[gs.currentIdx]
+        if entry then
+            local spellID = entry.spellID
+            if not spellID or spellID == 0 then
+                local specID = HexCD.SpecCache and HexCD.SpecCache.Get
+                    and HexCD.SpecCache:Get(entry.name) or nil
+                local classInfo = entry.class and ResolveKickSpell(entry.class, specID)
+                spellID = classInfo and classInfo.spellID or 0
+            end
+            HandleKickByName(entry.name, spellID, gi, "anon-advance")
+        end
     end
 end
 
@@ -1126,6 +1166,7 @@ eventFrame:SetScript("OnEvent", function(self, event, ...)
                 local gi = myGroupIdx or 1
                 HandleKickByName(playerName, cleanID, gi, "self")
                 BroadcastKickCast(playerName, cleanID, gi)
+                lastPlayerKickTime = GetTime()
             end
         end
 
@@ -1477,4 +1518,17 @@ end
 -- bars when a new kicker was added via KickCorrel).
 function KT:_testCorrelRoute(shortName, bestUnit)
     KT:_correlRoute(shortName, bestUnit)
+end
+
+--- Force the value of lastPlayerKickTime so tests can simulate "Layer 1
+--- just fired" without going through the full event pipeline.
+function KT:_testSetLastPlayerKickTime(t)
+    lastPlayerKickTime = t or 0
+end
+
+--- Trigger the degraded-mode anonymous advance directly. Used by tests
+--- that want to exercise the 12.0.5+ branch without simulating the full
+--- correlation pipeline.
+function KT:_testAnonymousAdvance()
+    KT:_anonymousAdvance()
 end

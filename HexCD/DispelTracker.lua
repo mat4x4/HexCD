@@ -63,6 +63,12 @@ local alertedForCurrentDebuffs = false  -- true = already alerted, don't repeat 
 local UPDATE_THROTTLE = 0.2
 local ADDON_MSG_PREFIX = "HexCD"
 local commsRegistered = false
+-- 12.0.5+: when UNIT_SPELLCAST_SUCCEEDED stops firing for non-player units,
+-- attribution dies. Track the player's most recent self-dispel so the
+-- degraded path can skip the debuff removal that the player demonstrably
+-- caused (Layer 1 already credited them).
+local lastPlayerDispelTime = 0
+local DEGRADED_DEDUP_WINDOW = 0.5  -- seconds; debuff removal events can lag the cast
 
 ------------------------------------------------------------------------
 -- Per-Group State (2 groups for raid use)
@@ -821,6 +827,25 @@ local function HandleDispelByName(casterName, spellID, groupIdx)
     end
 end
 
+--- 12.0.5+ degraded mode: a dispellable debuff disappeared from a friendly
+--- unit but no cast event can attribute it. Credit the current rotation
+--- slot of each active group as the dispeller, using their resolved
+--- dispel spell.
+function DT:_anonymousAdvance()
+    for gi = 1, MAX_GROUPS do
+        local gs = groups[gi]
+        local entry = gs.rotation[gs.currentIdx]
+        if entry then
+            local spellID = entry.spellID
+            if (not spellID or spellID == 0) and entry.class then
+                local info = DISPEL_SPELLS[entry.class]
+                spellID = info and info.spellID or 0
+            end
+            HandleDispelByName(entry.name, spellID, gi)
+        end
+    end
+end
+
 local function HandleAddonMessage(prefix, message, _, sender)
     if prefix ~= ADDON_MSG_PREFIX then return end
 
@@ -880,10 +905,40 @@ eventFrame:SetScript("OnEvent", function(self, event, ...)
     if event == "UNIT_AURA" then
         local unit = ...
         if not groupUnits[unit] and unit ~= "player" then return end
+
+        -- 12.0.5+ degraded mode: detect a dispellable debuff dropping off
+        -- a watched unit so we can anon-advance the rotation when no cast
+        -- event will arrive to attribute it.
+        local prevCount = 0
+        if Util.NoCastSucceeded() then
+            local prev = activeDebuffs[unit]
+            if prev then
+                for _ in pairs(prev) do prevCount = prevCount + 1 end
+            end
+        end
+
         ScanUnitAuras(unit)
         UpdateVisibility()
         -- Re-check alert: a new debuff may have appeared while it's our turn
         DT:CheckAlert()
+
+        if Util.NoCastSucceeded() and prevCount > 0 then
+            local newCount = 0
+            local cur = activeDebuffs[unit]
+            if cur then
+                for _ in pairs(cur) do newCount = newCount + 1 end
+            end
+            if newCount < prevCount then
+                local now = GetTime()
+                local skip = (now - lastPlayerDispelTime) <= DEGRADED_DEDUP_WINDOW
+                if skip then
+                    Log:Log("DEBUG", "DispelTracker: skip anon-advance (player self-dispel in window)")
+                else
+                    Log:Log("DEBUG", "DispelTracker: debuff dropped on " .. tostring(unit) .. " — anon-advance (12.0.5+ degraded)")
+                    DT:_anonymousAdvance()
+                end
+            end
+        end
 
     elseif event == "UNIT_SPELLCAST_SUCCEEDED" then
         local unit, _, spellID = ...
@@ -896,6 +951,7 @@ eventFrame:SetScript("OnEvent", function(self, event, ...)
                 local gi = myGroupIdx or 1
                 HandleDispelByName(playerName, spellID, gi)
                 BroadcastDispelCast(playerName, spellID, gi)
+                lastPlayerDispelTime = GetTime()
             end
         else
             -- Party member: try direct then launder (Midnight secret values)
@@ -1258,4 +1314,14 @@ end
 --- Test helper: inject an addon message
 function DT:_testInjectMessage(msg, sender)
     HandleAddonMessage(ADDON_MSG_PREFIX, msg, "PARTY", sender or "Test-Realm")
+end
+
+--- Test helper: directly trigger the degraded-mode anonymous advance.
+function DT:_testAnonymousAdvance()
+    DT:_anonymousAdvance()
+end
+
+--- Test helper: force lastPlayerDispelTime so dedup logic can be exercised.
+function DT:_testSetLastPlayerDispelTime(t)
+    lastPlayerDispelTime = t or 0
 end
